@@ -1,0 +1,21 @@
+[package]
+name = "lava-gitlab-runner"
+version = "0.1.0"
+authors = ["Sjoerd Simons <sjoerd@collabora.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+gitlab-runner = "0.0.1"
+lava-api = { git = "https://gitlab.collabora.com/lava/lava-api.git", branch = "wip/sjoerd/job-logs-2" }
+log = "0.4.14"
+env_logger = "0.9.0"
+structopt = "0.3.23"
+url = "2.2.2"
+tokio = "1.12.0"
+async-trait = "0.1.51"
+futures = "0.3.17"
+serde = { version = "^1.0.97", features = ["derive"] }
+serde_json = "1.0.68"
+
