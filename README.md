@@ -115,7 +115,7 @@ lava submission:
   artifacts:
     when: always
     paths:
-      - *.yaml
+      - "*.yaml"
 ```
 
 To monitor a set of jobs and retrieve their log files the following snippet can
@@ -133,5 +133,5 @@ lava submission:
   artifacts:
     when: always
     paths:
-      - *.yaml
+      - "*.yaml"
 ```
