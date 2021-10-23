@@ -12,10 +12,58 @@ use lava_api::job::Health;
 use lava_api::joblog::JobLogError;
 use lava_api::{job, Lava};
 use log::{debug, info};
+use rand::random;
 use serde::Deserialize;
 use structopt::StructOpt;
 use tokio::time::sleep;
 use url::Url;
+
+#[derive(Debug, Clone)]
+struct MonitorTimeout {
+    next: Duration,
+    max: Duration,
+}
+
+impl MonitorTimeout {
+    fn new(initial: Duration, max: Duration) -> Self {
+        MonitorTimeout { next: initial, max }
+    }
+
+    fn next_timeout(&mut self) -> Duration {
+        self.next().unwrap()
+    }
+}
+
+impl Iterator for MonitorTimeout {
+    type Item = Duration;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let t = self.next.min(self.max);
+        self.next = self.max.min(t * 2);
+
+        /* Give a 25% random interval */
+        let delta = t / 4;
+        Some(t - delta / 2 + delta.mul_f32(random::<f32>()))
+    }
+}
+
+#[test]
+fn monitor_timeout() {
+    let max = Duration::from_secs(600);
+    let m = MonitorTimeout::new(Duration::from_secs(1), max);
+
+    for (i, current) in m.take(20).enumerate() {
+        // The expectation is that for each iteration the timeout median doubles and we start from
+        // 1 second; maxing out at the maximum value
+        let expected = Duration::from_secs(2u64.pow(i as u32)).min(max);
+        assert!(
+            current >= expected.mul_f32(0.75) && current < expected.mul_f32(1.25),
+            "expected {:?} (+/- 25%), actual {:?}",
+            expected,
+            current
+        );
+    }
+}
 
 #[derive(StructOpt)]
 struct Opts {
@@ -140,6 +188,7 @@ impl Run {
     async fn wait_for_jobs(&self, mut ids: HashSet<i64>) -> JobResult {
         let mut running = HashSet::new();
         let mut failures = false;
+        let mut timeout = MonitorTimeout::new(Duration::from_secs(30), Duration::from_secs(600));
         loop {
             let mut builder = self.lava.jobs();
             for id in &ids {
@@ -178,7 +227,7 @@ impl Run {
                 break;
             }
 
-            sleep(Duration::from_secs(20)).await;
+            sleep(timeout.next_timeout()).await;
         }
 
         if failures {
