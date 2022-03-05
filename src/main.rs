@@ -6,16 +6,20 @@ use futures::stream::TryStreamExt;
 use futures::AsyncWriteExt;
 use futures::StreamExt;
 use gitlab_runner::job::Job;
+use gitlab_runner::outputln;
 use gitlab_runner::uploader::Uploader;
 use gitlab_runner::{JobHandler, JobResult, Phase, Runner};
 use lava_api::job::Health;
 use lava_api::joblog::JobLogError;
 use lava_api::{job, Lava};
-use log::{debug, info};
 use rand::random;
 use serde::Deserialize;
 use structopt::StructOpt;
 use tokio::time::sleep;
+use tracing::Level;
+use tracing::{debug, info};
+use tracing_subscriber::filter;
+use tracing_subscriber::prelude::*;
 use url::Url;
 
 #[derive(Debug, Clone)]
@@ -71,6 +75,8 @@ struct Opts {
     server: Url,
     #[structopt(env = "GITLAB_TOKEN")]
     token: String,
+    #[structopt(short, long, env = "RUNNER_LOG")]
+    log: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -100,9 +106,7 @@ impl Run {
             let artifact = match d.download().await {
                 Ok(a) => a,
                 Err(_) => {
-                    self.job
-                        .trace(format!("Failed to get artifact from {}", d.name()))
-                        .await;
+                    outputln!("Failed to get artifact from {}", d.name());
                     continue;
                 }
             };
@@ -117,17 +121,13 @@ impl Run {
                 return match data {
                     Ok(data) => Ok(data),
                     Err(e) => {
-                        self.job
-                            .trace(format!("Failed to read file from artifact: {}", e))
-                            .await;
+                        outputln!("Failed to read file from artifact: {}", e);
                         Err(())
                     }
                 };
             }
         }
-        self.job
-            .trace(format!("{} not found in artifacts", filename))
-            .await;
+        outputln!("{} not found in artifacts", filename);
         Err(())
     }
 
@@ -145,16 +145,12 @@ impl Run {
         match self.lava.submit_job(definition).await {
             Ok(ids) => {
                 for i in &ids {
-                    self.job
-                        .trace(format!("Scheduled job: {}\n\n", self.url_for_id(*i)))
-                        .await;
+                    outputln!("Scheduled job: {}", self.url_for_id(*i));
                 }
                 Ok(ids)
             }
             Err(e) => {
-                self.job
-                    .trace(format!("Failed to submit job: {:?}", e))
-                    .await;
+                outputln!("Failed to submit job: {:?}", e);
                 Err(())
             }
         }
@@ -165,16 +161,12 @@ impl Run {
         while let Some(entry) = log.next().await {
             match entry {
                 Ok(entry) => {
-                    self.job
-                        .trace(format!("{} {:?}\n", entry.dt, entry.msg))
-                        .await;
+                    outputln!("{} {:?}", entry.dt, entry.msg);
                     *offset += 1;
                 }
                 Err(JobLogError::NoData) => (),
                 Err(JobLogError::ParseError(s, e)) => {
-                    self.job
-                        .trace(format!("Couldn't parse {} - {}\n", s.trim_end(), e))
-                        .await;
+                    outputln!("Couldn't parse {} - {}", s.trim_end(), e);
                     *offset += 1;
                 }
                 Err(e) => {
@@ -199,24 +191,15 @@ impl Run {
             while let Some(job) = jobs.next().await {
                 if let Ok(job) = job {
                     if job.state == job::State::Running && !running.contains(&job.id) {
-                        self.job
-                            .trace(format!("{} is running\n", self.url_for_id(job.id)))
-                            .await;
+                        outputln!("{} is running", self.url_for_id(job.id));
                         running.insert(job.id);
                     }
                     if job.state == job::State::Finished {
                         ids.remove(&job.id);
                         if job.health == Health::Complete {
-                            self.job
-                                .trace(format!(
-                                    "{} successfully finished\n",
-                                    self.url_for_id(job.id)
-                                ))
-                                .await;
+                            outputln!("{} successfully finished", self.url_for_id(job.id));
                         } else {
-                            self.job
-                                .trace(format!("{} UNSUCCESSFULL!\n", self.url_for_id(job.id)))
-                                .await;
+                            outputln!("{} UNSUCCESSFULL!", self.url_for_id(job.id));
                             failures = true;
                         }
                     }
@@ -253,7 +236,7 @@ impl Run {
                             if job.health == Health::Complete {
                                 return Ok(());
                             } else {
-                                self.job.trace("Job didn't complete correctly\n").await;
+                                outputln!("Job didn't complete correctly");
                                 return Err(());
                             }
                         }
@@ -262,13 +245,11 @@ impl Run {
                     self.update_log(id, &mut offset).await;
                 }
                 Ok(None) => {
-                    self.job.trace("Lava doesn't know about our job?").await;
+                    outputln!("Lava doesn't know about our job?");
                     return Err(());
                 }
                 Err(e) => {
-                    self.job
-                        .trace(format!("Failed to check status: {:?}", e))
-                        .await;
+                    outputln!("Failed to check status: {:?}", e);
                 }
             }
 
@@ -277,7 +258,7 @@ impl Run {
     }
 
     async fn command(&mut self, command: &str) -> JobResult {
-        self.job.trace(format!("> {}\n", command)).await;
+        outputln!("> {}", command);
         let mut p = command.split_whitespace();
         if let Some(cmd) = p.next() {
             debug!("command: >{}<", cmd);
@@ -288,7 +269,7 @@ impl Run {
                         let definition = match String::from_utf8(data) {
                             Ok(data) => data,
                             Err(_) => {
-                                self.job.trace("Job definition is not utf-8").await;
+                                outputln!("Job definition is not utf-8");
                                 return Err(());
                             }
                         };
@@ -296,7 +277,7 @@ impl Run {
                         self.ids.extend(&ids);
                         self.follow_job(ids[0]).await
                     } else {
-                        self.job.trace("Missing file to submit").await;
+                        outputln!("Missing file to submit");
                         Err(())
                     }
                 }
@@ -306,9 +287,7 @@ impl Run {
                         let jobs: MonitorJobs = match serde_json::from_slice(&data) {
                             Ok(jobs) => jobs,
                             Err(e) => {
-                                self.job
-                                    .trace(format!("Failed to pars job file: {}", e))
-                                    .await;
+                                outputln!("Failed to pars job file: {}", e);
                                 return Err(());
                             }
                         };
@@ -316,26 +295,24 @@ impl Run {
                         let mut ids = HashSet::new();
                         ids.extend(&jobs.jobids);
 
-                        self.job.trace("Waiting for jobs:\n").await;
+                        outputln!("Waiting for jobs:");
                         for id in &ids {
-                            self.job
-                                .trace(format!("\t* {}\n\n", self.url_for_id(*id)))
-                                .await;
+                            outputln!("\t* {}", self.url_for_id(*id));
                         }
-                        self.job.trace("\n").await;
+                        outputln!("");
                         self.wait_for_jobs(ids).await
                     } else {
-                        self.job.trace("Missing file to submit").await;
+                        outputln!("Missing file to submit");
                         Err(())
                     }
                 }
                 _ => {
-                    self.job.trace("Unknown command\n").await;
+                    outputln!("Unknown command");
                     Err(())
                 }
             }
         } else {
-            self.job.trace("empty command").await;
+            outputln!("empty command");
             Err(())
         }
     }
@@ -352,24 +329,22 @@ impl JobHandler for Run {
     }
 
     async fn upload_artifacts(&mut self, upload: &mut Uploader) -> JobResult {
-        self.job.trace("\n\nUploading logs:\n").await;
+        outputln!("\n\nUploading logs:");
         for id in &self.ids {
             let filename = format!("{}_log.yaml", id);
             let mut file = upload.file(filename.clone()).await;
-            self.job.trace(format!("Uploading {}\n", filename)).await;
+            outputln!("Uploading {}", filename);
             let mut log = self.lava.log(*id).raw();
 
             while let Some(bytes) = log.next().await {
                 match bytes {
                     Ok(b) => {
                         if let Err(e) = file.write_all(&b).await {
-                            self.job
-                                .trace(format!("Failed to write to jog log file {}\n", e))
-                                .await;
+                            outputln!("Failed to write to jog log file {}", e);
                         }
                     }
                     Err(e) => {
-                        self.job.trace(format!("Couldn't read log {}\n", e)).await;
+                        outputln!("Couldn't read log {}", e);
                         return Err(());
                     }
                 }
@@ -381,16 +356,30 @@ impl JobHandler for Run {
 
 #[tokio::main]
 async fn main() {
-    env_logger::init();
     let opts = Opts::from_args();
-    let mut runner = Runner::new(opts.server, opts.token);
+    let dir = tempfile::tempdir().unwrap();
+
+    let (mut runner, layer) =
+        Runner::new_with_layer(opts.server, opts.token, dir.path().to_path_buf());
+
+    let log_targets: filter::Targets = if let Some(log) = opts.log {
+        log.parse().unwrap()
+    } else {
+        filter::Targets::new().with_default(Level::INFO)
+    };
+
+    tracing_subscriber::Registry::default()
+        .with(layer)
+        .with(tracing_subscriber::fmt::Layer::new().with_filter(log_targets))
+        .init();
+
     runner
         .run(
             move |job| async move {
                 let lava_url = match job.variable("LAVA_URL") {
                     Some(u) => u,
                     None => {
-                        job.trace("Missing LAVA_URL").await;
+                        outputln!("Missing LAVA_URL");
                         return Err(());
                     }
                 };
@@ -398,7 +387,7 @@ async fn main() {
                 let lava_token = match job.variable("LAVA_TOKEN") {
                     Some(t) => t,
                     None => {
-                        job.trace("Missing LAVA_TOKEN").await;
+                        outputln!("Missing LAVA_TOKEN");
                         return Err(());
                     }
                 };
@@ -406,7 +395,7 @@ async fn main() {
                 let url = match lava_url.value().parse() {
                     Ok(u) => u,
                     Err(e) => {
-                        job.trace(format!("LAVA_URL is invalid: {}", e)).await;
+                        outputln!("LAVA_URL is invalid: {}", e);
                         return Err(());
                     }
                 };
@@ -414,7 +403,7 @@ async fn main() {
                 let lava = match Lava::new(lava_url.value(), Some(lava_token.value().to_string())) {
                     Ok(l) => l,
                     Err(e) => {
-                        job.trace(format!("Failed to setup lava: {}", e)).await;
+                        outputln!("Failed to setup lava: {}", e);
                         return Err(());
                     }
                 };

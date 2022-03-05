@@ -2,17 +2,15 @@
 name = "lava-gitlab-runner"
 version = "0.1.0"
 authors = ["Sjoerd Simons <sjoerd@collabora.com>"]
-edition = "2018"
+edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Gitlab runner bridge to lava"
 homepage = "https://gitlab.collabora.com/lava/lava-gitlab-runner"
 repository = "https://gitlab.collabora.com/lava/lava-gitlab-runner.git"
 
 [dependencies]
-gitlab-runner = "0.0.1"
+gitlab-runner = "0.0.2-alpha.2"
 lava-api = { git = "https://gitlab.collabora.com/lava/lava-api.git", branch = "wip/sjoerd/job-logs-2" }
-log = "0.4.14"
-env_logger = "0.9.0"
 structopt = "0.3.23"
 url = "2.2.2"
 tokio = "1.12.0"
@@ -21,4 +19,7 @@ futures = "0.3.17"
 serde = { version = "^1.0.97", features = ["derive"] }
 serde_json = "1.0.68"
 rand = "0.8.4"
+tempfile = "3.3.0"
+tracing-subscriber = { version = "0.3.9", features = [ "env-filter"] }
+tracing = "0.1.31"
 
