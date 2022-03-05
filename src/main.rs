@@ -354,6 +354,43 @@ impl JobHandler for Run {
     }
 }
 
+async fn new_job(job: Job) -> Result<impl JobHandler, ()> {
+    info!("Creating new run for job: {}", job.id());
+    let lava_url = match job.variable("LAVA_URL") {
+        Some(u) => u,
+        None => {
+            outputln!("Missing LAVA_URL");
+            return Err(());
+        }
+    };
+
+    let lava_token = match job.variable("LAVA_TOKEN") {
+        Some(t) => t,
+        None => {
+            outputln!("Missing LAVA_TOKEN");
+            return Err(());
+        }
+    };
+
+    let url = match lava_url.value().parse() {
+        Ok(u) => u,
+        Err(e) => {
+            outputln!("LAVA_URL is invalid: {}", e);
+            return Err(());
+        }
+    };
+
+    let lava = match Lava::new(lava_url.value(), Some(lava_token.value().to_string())) {
+        Ok(l) => l,
+        Err(e) => {
+            outputln!("Failed to setup lava: {}", e);
+            return Err(());
+        }
+    };
+
+    Ok(Run::new(lava, url, job))
+}
+
 #[tokio::main]
 async fn main() {
     let opts = Opts::from_args();
@@ -374,45 +411,7 @@ async fn main() {
         .init();
 
     runner
-        .run(
-            move |job| async move {
-                let lava_url = match job.variable("LAVA_URL") {
-                    Some(u) => u,
-                    None => {
-                        outputln!("Missing LAVA_URL");
-                        return Err(());
-                    }
-                };
-
-                let lava_token = match job.variable("LAVA_TOKEN") {
-                    Some(t) => t,
-                    None => {
-                        outputln!("Missing LAVA_TOKEN");
-                        return Err(());
-                    }
-                };
-
-                let url = match lava_url.value().parse() {
-                    Ok(u) => u,
-                    Err(e) => {
-                        outputln!("LAVA_URL is invalid: {}", e);
-                        return Err(());
-                    }
-                };
-
-                let lava = match Lava::new(lava_url.value(), Some(lava_token.value().to_string())) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        outputln!("Failed to setup lava: {}", e);
-                        return Err(());
-                    }
-                };
-
-                info!("Created run");
-                Ok(Run::new(lava, url, job))
-            },
-            64,
-        )
+        .run(new_job, 64)
         .await
         .expect("Couldn't pick up jobs");
 }
