@@ -182,6 +182,10 @@ impl Run {
         let mut failures = false;
         let mut timeout = MonitorTimeout::new(Duration::from_secs(30), Duration::from_secs(600));
         loop {
+            if ids.is_empty() {
+                break;
+            }
+
             let mut builder = self.lava.jobs();
             for id in &ids {
                 builder = builder.id(*id);
@@ -204,10 +208,6 @@ impl Run {
                         }
                     }
                 }
-            }
-
-            if ids.is_empty() {
-                break;
             }
 
             sleep(timeout.next_timeout()).await;
@@ -284,10 +284,14 @@ impl Run {
                 "monitor-file" => {
                     if let Some(filename) = p.next() {
                         let data = self.find_file(filename).await?;
-                        let jobs: MonitorJobs = match serde_json::from_slice(&data) {
+                        let jobs = match serde_json::from_slice::<MonitorJobs>(&data) {
+                            Ok(jobs) if jobs.jobids.is_empty() => {
+                                outputln!("No job ids in json file!");
+                                return Err(());
+                            }
                             Ok(jobs) => jobs,
                             Err(e) => {
-                                outputln!("Failed to pars job file: {}", e);
+                                outputln!("Failed to parse job file: {}", e);
                                 return Err(());
                             }
                         };
