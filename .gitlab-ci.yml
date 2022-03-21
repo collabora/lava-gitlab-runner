@@ -57,7 +57,6 @@ docker image:
   stage: deploy
   image: alpine/k8s:1.19.8
   script:
-    - kubectl get namespace "$KUBE_NAMESPACE" || kubectl create namespace "$KUBE_NAMESPACE"
     - >
       kubectl create secret -n "$KUBE_NAMESPACE"
       docker-registry "gitlab-registry-${CI_PROJECT_PATH_SLUG}"
