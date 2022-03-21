@@ -49,14 +49,3 @@ Selector labels
 app.kubernetes.io/name: {{ include "lava-gitlab-runner.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
-
-{{/*
-Create the name of the service account to use
-*/}}
-{{- define "lava-gitlab-runner.serviceAccountName" -}}
-{{- if .Values.serviceAccount.create }}
-{{- default (include "lava-gitlab-runner.fullname" .) .Values.serviceAccount.name }}
-{{- else }}
-{{- default "default" .Values.serviceAccount.name }}
-{{- end }}
-{{- end }}
