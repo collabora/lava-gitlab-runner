@@ -48,26 +48,26 @@ run directly from source `cargo run https://gitlab.myserver.org RUNNER_TOKEN`.
 
 ## Running from a docker image
 
-A pre-build docker image can be found at
+A pre-built docker image can be found at
 registry.gitlab.collabora.com/lava/lava-gitlab-runner/main. To connect to the
-gitlab server `GITLAB_URL` and `GITLAB_TOKEN` should be set in the docker
+gitlab server, `GITLAB_URL` and `GITLAB_TOKEN` should be set in the docker
 environment when running the container.
 
 ## Running in a Kubernetes cluster
 
-A helm chart is provided in the repository for the runner (in the chart
+A helm chart is provided in the repository for the runner (in the `chart`
 directory). The main values in this chart that should be set are `gitlab.url` to
 set the gitlab url and `gitlab.token` to set the gitlab token.
 
 # Runner Usage
 
-The runner is used with normal gitlab runner jobs, same as any other runner.
-The main difference is that rather then the script commands being run inside a
-shell they're directly and executed by the runner itself.
+The runner is used with normal gitlab runner jobs in the same way as other
+runners. The main difference is that rather then the script commands being run
+inside a shell they're directly executed by the runner itself.
 
 ## Runner variables usage
 
-* `LAVA_URL`: This defines the lava server this job should work with
+* `LAVA_URL`: This lava server the job should work with
 * `LAVA_TOKEN`: The lava authentication token
 
 These variables will typically be set as (masked) CI variables, but they could
@@ -77,8 +77,8 @@ also be provided directly in the job.
 
 The following commands are currently supported in the job scripts:
 
-`submit <filename>` - This submit the given filename from the dependencies to
-the to the lava server and will follow the lava jobs log output. The gitlab job will
+`submit <filename>` - This submits the given filename from the dependencies to
+the lava server and will follow the lava job's log output. The gitlab job will
 fail if the lava job ends in an incomplete state or any other issue occurs
 (e.g. submission failure)
 
@@ -87,22 +87,22 @@ fail if the lava job ends in an incomplete state or any other issue occurs
 
 `monitor-file <filename>` - This monitors the lava job ids in the given filename
 from the dependencies. The job file should be a json file containing a
-dictionary with a "jobids" field which holds an array of ids. e.g.
-`{"jobids": [ 1, 2, 3, 4]}`. As multiple lava jobs can be monitored the job
+dictionary with a "jobids" field which holds an array of ids, e.g.
+`{"jobids": [ 1, 2, 3, 4]}`. As multiple lava jobs can be monitored, the job
 outputs will not be directly logged to the gitlab job log output, only the job
 states are logged. The job will fail if one of the lava jobs finishes with an
 incomplete state.
 
 ## Runner artifacts
 
-When the gitlab job definition defines artifacts the log file(s) of the
+When the gitlab job definition defines artifacts, the log file(s) of the
 submitted or monitor jobs will be uploaded as an artifact by the runner.
 
 ## Example jobs
 
-To submit a job to lava , monitor it and retrieve the raw log as a job artifact
+To submit a job to lava, monitor it and retrieve the raw log as a job artifact
 the following snippet can be used. The referred `lava-job.yaml` should be a file
-available in one of the artifacts from the jobs dependencies.
+available in one of the artifacts from the job's dependencies.
 
 ```
 lava submission:
@@ -115,12 +115,12 @@ lava submission:
   artifacts:
     when: always
     paths:
-      - *.yaml
+      - "*.yaml"
 ```
 
 To monitor a set of jobs and retrieve their log files the following snippet can
 be used.The referred `tests.json` should be a file available in one of the
-artifacts from the jobs dependencies.
+artifacts from the job's dependencies.
 
 ```
 lava submission:
@@ -133,5 +133,5 @@ lava submission:
   artifacts:
     when: always
     paths:
-      - *.yaml
+      - "*.yaml"
 ```
