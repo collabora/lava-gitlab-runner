@@ -46,7 +46,7 @@ docker image:
       /kaniko/executor
       --context $CI_PROJECT_DIR/
       --dockerfile $CI_PROJECT_DIR/Dockerfile
-      --destination $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG:$CI_COMMIT_SHA
+      --destination $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG:$CI_PIPELINE_IID-$CI_COMMIT_SHA
       --destination $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG:latest
       --build-arg REGISTRY=$CI_REGISTRY_IMAGE
       --single-snapshot
@@ -60,7 +60,7 @@ docker image:
     - >
       kubectl create secret -n "$KUBE_NAMESPACE"
       docker-registry "gitlab-registry-${CI_PROJECT_PATH_SLUG}"
-      --docker-server="$CI_REGISTRY" 
+      --docker-server="$CI_REGISTRY"
       --docker-username="${CI_DEPLOY_USER:-$CI_REGISTRY_USER}"
       --docker-password="${CI_DEPLOY_PASSWORD:-$CI_REGISTRY_PASSWORD}"
       --docker-email="$GITLAB_USER_EMAIL"
@@ -71,7 +71,7 @@ docker image:
       --set gitlab.app="$CI_PROJECT_PATH_SLUG"
       --set gitlab.env="$CI_ENVIRONMENT_SLUG"
       --set image.repository="$CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG"
-      --set-string image.tag="$CI_COMMIT_SHA"
+      --set-string image.tag="$CI_PIPELINE_IID-$CI_COMMIT_SHA"
       --set-string gitlab.url="$GITLAB_URL"
       --set-string gitlab.token="$GITLAB_TOKEN"
       --namespace="$KUBE_NAMESPACE"
