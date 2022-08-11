@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 use std::time::Duration;
 
@@ -9,11 +9,12 @@ use gitlab_runner::job::Job;
 use gitlab_runner::outputln;
 use gitlab_runner::uploader::Uploader;
 use gitlab_runner::{JobHandler, JobResult, Phase, Runner};
+use handlebars::Handlebars;
 use lava_api::job::Health;
 use lava_api::joblog::JobLogError;
 use lava_api::{job, Lava};
 use rand::random;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
 use tokio::time::sleep;
 use tracing::Level;
@@ -82,6 +83,11 @@ struct Opts {
 #[derive(Deserialize, Debug, Clone)]
 struct MonitorJobs {
     jobids: Vec<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TransformVariables<'a> {
+    pub job: BTreeMap<&'a str, &'a str>,
 }
 
 struct Run {
@@ -257,6 +263,27 @@ impl Run {
         }
     }
 
+    fn transform(&self, definition: String) -> Result<String, ()> {
+        let mut handlebars = Handlebars::new();
+        handlebars.set_strict_mode(true);
+        handlebars
+            .register_template_string("definition", definition)
+            .map_err(|e| {
+                outputln!("Failed to parse template: {}", e);
+            })?;
+
+        let mappings = TransformVariables {
+            job: self
+                .job
+                .variables()
+                .map(|var| (var.key(), var.value()))
+                .collect(),
+        };
+        handlebars.render("definition", &mappings).map_err(|e| {
+            outputln!("Failed to substitute in template: {}", e);
+        })
+    }
+
     async fn command(&mut self, command: &str) -> JobResult {
         outputln!("> {}", command);
         let mut p = command.split_whitespace();
@@ -267,7 +294,7 @@ impl Run {
                     if let Some(filename) = p.next() {
                         let data = self.find_file(filename).await?;
                         let definition = match String::from_utf8(data) {
-                            Ok(data) => data,
+                            Ok(data) => self.transform(data)?,
                             Err(_) => {
                                 outputln!("Job definition is not utf-8");
                                 return Err(());

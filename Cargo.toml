@@ -9,13 +9,14 @@ homepage = "https://gitlab.collabora.com/lava/lava-gitlab-runner"
 repository = "https://gitlab.collabora.com/lava/lava-gitlab-runner.git"
 
 [dependencies]
-gitlab-runner = "0.0.5"
+gitlab-runner = "0.0.6"
 lava-api = { git = "https://gitlab.collabora.com/lava/lava-api.git", branch = "wip/sjoerd/job-logs-2" }
 structopt = "0.3.23"
 url = "2.2.2"
 tokio = "1.12.0"
 async-trait = "0.1.51"
 futures = "0.3.17"
+handlebars = "4"
 serde = { version = "^1.0.97", features = ["derive"] }
 serde_json = "1.0.68"
 rand = "0.8.4"
