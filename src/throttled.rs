@@ -9,31 +9,144 @@ use lava_api::tag::Tag;
 use lava_api::worker::Worker;
 use lava_api::Lava;
 
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(debug_assertions)]
+use std::sync::Mutex;
+#[cfg(debug_assertions)]
+use std::time::Instant;
+#[cfg(debug_assertions)]
+use tracing::{debug, trace};
+
+#[cfg(debug_assertions)]
+#[derive(Debug)]
+struct PermitDebug<'a> {
+    owner: &'a ThrottlerDebug,
+    debug_name: String,
+    start: Option<Instant>,
+}
+
+#[cfg(debug_assertions)]
+impl<'a> Drop for PermitDebug<'a> {
+    fn drop(&mut self) {
+        match self.start {
+            Some(start) => {
+                let now = Instant::now();
+                debug!(
+                    "Permit released for {} (held for {}s)",
+                    self.debug_name,
+                    now.duration_since(start).as_secs_f32()
+                );
+                let mut g = self.owner.active_permits.lock().unwrap();
+                let ix = g.iter().position(|x| *x == self.debug_name).unwrap();
+                g.remove(ix);
+            }
+            None => {
+                debug!(
+                    "Permit debug data dropped before permit was acquired for {}",
+                    self.debug_name
+                );
+            }
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+#[derive(Debug)]
+struct ThrottlerDebug {
+    active_permits: Mutex<Vec<String>>,
+    next_id: AtomicUsize,
+}
+
+#[cfg(debug_assertions)]
+impl ThrottlerDebug {
+    pub fn new() -> Self {
+        Self {
+            active_permits: Mutex::new(Vec::new()),
+            next_id: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn pre_acquire(&self, name: &str, throttler: &Throttler) -> PermitDebug<'_> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let target = format!("{} ({})", name, id);
+
+        debug!(
+            "Waiting for permit {} (available {})",
+            target,
+            throttler.tickets.available_permits()
+        );
+
+        {
+            let g = self.active_permits.lock().unwrap();
+            for job in g.iter() {
+                trace!("Active job: {}", job);
+            }
+        }
+
+        PermitDebug {
+            owner: self,
+            debug_name: target,
+            start: None,
+        }
+    }
+
+    pub fn post_acquire<'a>(&self, mut permit_debug: PermitDebug<'a>) -> PermitDebug<'a> {
+        self.active_permits
+            .lock()
+            .unwrap()
+            .push(permit_debug.debug_name.clone());
+        debug!("Permit acquired {}", permit_debug.debug_name);
+        permit_debug.start = Some(Instant::now());
+        permit_debug
+    }
+}
+
 #[derive(Debug)]
 pub struct Permit<'a> {
     _permit: SemaphorePermit<'a>,
+    #[cfg(debug_assertions)]
+    _debug: PermitDebug<'a>,
 }
 
 #[derive(Debug)]
 pub struct Throttler {
     tickets: Semaphore,
+    #[cfg(debug_assertions)]
+    debug: ThrottlerDebug,
 }
 
 impl Throttler {
     pub fn new(max_concurrent_requests: usize) -> Self {
         Self {
             tickets: Semaphore::new(max_concurrent_requests),
+            #[cfg(debug_assertions)]
+            debug: ThrottlerDebug::new(),
         }
     }
 
-    pub async fn acquire(&self) -> Permit<'_> {
+    pub async fn acquire(&self, _debug: &str) -> Permit<'_> {
+        #[cfg(debug_assertions)]
+        let debug = self.debug.pre_acquire(_debug, self);
+
         // This unwrap is safe: we never close the semaphore
         let permit = self.tickets.acquire().await.unwrap();
-        Permit { _permit: permit }
+
+        #[cfg(debug_assertions)]
+        let debug = self.debug.post_acquire(debug);
+
+        Permit {
+            _permit: permit,
+            #[cfg(debug_assertions)]
+            _debug: debug,
+        }
     }
 
     #[allow(dead_code)]
-    pub(crate) async fn try_acquire(&self) -> Option<Permit<'_>> {
+    pub(crate) async fn try_acquire(&self, _debug: &str) -> Option<Permit<'_>> {
+        #[cfg(debug_assertions)]
+        let debug = self.debug.pre_acquire(_debug, self);
+
         let permit = match self.tickets.try_acquire() {
             Ok(permit) => permit,
             Err(TryAcquireError::NoPermits) => {
@@ -44,7 +157,14 @@ impl Throttler {
             }
         };
 
-        Some(Permit { _permit: permit })
+        #[cfg(debug_assertions)]
+        let debug = self.debug.post_acquire(debug);
+
+        Some(Permit {
+            _permit: permit,
+            #[cfg(debug_assertions)]
+            _debug: debug,
+        })
     }
 }
 
@@ -86,42 +206,42 @@ impl ThrottledLava {
     }
 
     pub async fn refresh_tags(&self) -> Result<(), PaginationError> {
-        let _permit = self.throttler.acquire().await;
+        let _permit = self.throttler.acquire("refresh_tags").await;
         self.inner.refresh_tags().await
     }
 
     pub async fn tag(&self, tag: u32) -> Option<Tag> {
-        let _permit = self.throttler.acquire().await;
+        let _permit = self.throttler.acquire("tag").await;
         self.inner.tag(tag).await
     }
 
     pub async fn tags(&self) -> Result<Vec<Tag>, PaginationError> {
-        let _permit = self.throttler.acquire().await;
+        let _permit = self.throttler.acquire("tags").await;
         self.inner.tags().await
     }
 
     pub async fn devices(&self) -> Throttled<Devices> {
-        let permit = self.throttler.acquire().await;
+        let permit = self.throttler.acquire("devices").await;
         Throttled::new(self.inner.devices(), permit)
     }
 
     pub async fn log(&self, id: i64) -> ThrottledJobLogBuilder {
-        let permit = self.throttler.acquire().await;
+        let permit = self.throttler.acquire("log").await;
         ThrottledJobLogBuilder::new(self.inner.log(id), permit)
     }
 
     pub async fn jobs(&self) -> ThrottledJobsBuilder {
-        let permit = self.throttler.acquire().await;
+        let permit = self.throttler.acquire("jobs").await;
         ThrottledJobsBuilder::new(self.inner.jobs(), permit)
     }
 
     pub async fn submit_job(&self, definition: &str) -> Result<Vec<i64>, job::SubmissionError> {
-        let _permit = self.throttler.acquire().await;
+        let _permit = self.throttler.acquire("submit_job").await;
         job::submit_job(&self.inner, definition).await
     }
 
     pub async fn workers(&self) -> Throttled<Paginator<Worker>> {
-        let permit = self.throttler.acquire().await;
+        let permit = self.throttler.acquire("workers").await;
         Throttled::new(self.inner.workers(), permit)
     }
 }
@@ -293,17 +413,17 @@ mod tests {
     async fn test_throttler() {
         let t = Throttler::new(3);
 
-        let _p1 = t.acquire().await;
+        let _p1 = t.acquire("p1").await;
 
-        let _p2 = t.acquire().await;
+        let _p2 = t.acquire("p2").await;
 
-        let p3 = t.acquire().await;
+        let p3 = t.acquire("p3").await;
 
-        let no_p4 = t.try_acquire().await;
+        let no_p4 = t.try_acquire("p4 first").await;
         assert!(no_p4.is_none());
 
         drop(p3);
 
-        let _p4 = t.acquire().await;
+        let _p4 = t.acquire("p4").await;
     }
 }

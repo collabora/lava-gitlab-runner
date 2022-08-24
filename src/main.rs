@@ -488,6 +488,10 @@ async fn main() {
     {
         let mut max_requests = MAX_CONCURRENT_REQUESTS.lock().unwrap();
         *max_requests = opts.max_concurrent_requests;
+        info!(
+            "Setting max concurrent requests to {}",
+            opts.max_concurrent_requests
+        );
     }
 
     runner
