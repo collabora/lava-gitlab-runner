@@ -85,7 +85,12 @@ struct Opts {
     token: String,
     #[structopt(short, long, env = "RUNNER_LOG")]
     log: Option<String>,
-    #[structopt(short, long, env = "RUNNER_MAX_CONCURRENT_REQUESTS")]
+    #[structopt(
+        short,
+        long,
+        default_value = "4",
+        env = "RUNNER_MAX_CONCURRENT_REQUESTS"
+    )]
     max_concurrent_requests: usize,
 }
 
