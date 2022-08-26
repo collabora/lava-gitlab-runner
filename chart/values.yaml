@@ -5,6 +5,10 @@
 replicaCount: 1
 
 loglevel: "info"
+# Lava can struggle with a lot of parallel request so minimize these to
+# something reasonably low
+max_concurrent_requests: 4
+
 gitlab:
   url: https://your.gitlab.server.org
   #Set the runner token for a first deployment. It's inherited on later

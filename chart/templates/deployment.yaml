@@ -42,8 +42,10 @@ spec:
                  key: token
             - name: ALLOWED_HOSTS
               value: '*'
-            - name: RUST_LOG
+            - name: RUNNER_LOG
               value: {{ .Values.loglevel }}
+            - name: RUNNER_MAX_CONCURRENT_REQUESTS
+              value: {{ .Values.max_concurrent_requests }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}
