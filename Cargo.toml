@@ -9,8 +9,10 @@ homepage = "https://gitlab.collabora.com/lava/lava-gitlab-runner"
 repository = "https://gitlab.collabora.com/lava/lava-gitlab-runner.git"
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 gitlab-runner = "0.0.6"
 lava-api = { git = "https://gitlab.collabora.com/lava/lava-api.git", branch = "wip/sjoerd/job-logs-2" }
+lazy_static = "1.4"
 structopt = "0.3.23"
 url = "2.2.2"
 tokio = "1.12.0"

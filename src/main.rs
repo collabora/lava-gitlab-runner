@@ -1,5 +1,7 @@
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::stream::TryStreamExt;
@@ -12,7 +14,9 @@ use gitlab_runner::{JobHandler, JobResult, Phase, Runner};
 use handlebars::Handlebars;
 use lava_api::job::Health;
 use lava_api::joblog::JobLogError;
+use lava_api::paginator::PaginationError;
 use lava_api::{job, Lava};
+use lazy_static::lazy_static;
 use rand::random;
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
@@ -22,6 +26,9 @@ use tracing::{debug, info};
 use tracing_subscriber::filter;
 use tracing_subscriber::prelude::*;
 use url::Url;
+
+mod throttled;
+use throttled::{ThrottledLava, Throttler};
 
 #[derive(Debug, Clone)]
 struct MonitorTimeout {
@@ -78,6 +85,13 @@ struct Opts {
     token: String,
     #[structopt(short, long, env = "RUNNER_LOG")]
     log: Option<String>,
+    #[structopt(
+        short,
+        long,
+        default_value = "4",
+        env = "RUNNER_MAX_CONCURRENT_REQUESTS"
+    )]
+    max_concurrent_requests: usize,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -91,14 +105,14 @@ struct TransformVariables<'a> {
 }
 
 struct Run {
-    lava: Lava,
+    lava: Arc<ThrottledLava>,
     job: Job,
     url: Url,
     ids: Vec<i64>,
 }
 
 impl Run {
-    fn new(lava: Lava, url: Url, job: Job) -> Self {
+    fn new(lava: Arc<ThrottledLava>, url: Url, job: Job) -> Self {
         Self {
             lava,
             url,
@@ -163,7 +177,7 @@ impl Run {
     }
 
     async fn update_log(&self, id: i64, offset: &mut u64) {
-        let mut log = self.lava.log(id).start(*offset).log();
+        let mut log = self.lava.log(id).await.start(*offset).log();
         while let Some(entry) = log.next().await {
             match entry {
                 Ok(entry) => {
@@ -192,7 +206,7 @@ impl Run {
                 break;
             }
 
-            let mut builder = self.lava.jobs();
+            let mut builder = self.lava.jobs().await;
             for id in &ids {
                 builder = builder.id(*id);
             }
@@ -226,12 +240,21 @@ impl Run {
         }
     }
 
+    async fn get_job(&self, id: i64) -> Result<Option<job::Job>, PaginationError> {
+        let mut jobs = self.lava.jobs().await.id(id).query();
+        jobs.try_next().await
+    }
+
     async fn follow_job(&self, id: i64) -> JobResult {
-        let builder = self.lava.jobs().id(id);
         let mut offset = 0u64;
         loop {
-            let mut jobs = builder.clone().query();
-            match jobs.try_next().await {
+            // `get_job` is a separate function in order to limit the
+            // scope of the permit it obtains via the throttled Lava
+            // interface. This is important because within the loop we
+            // will obtain a second permit for access to the logs for
+            // this job. Owning two permits simultaneously can cause
+            // deadlocks in this version of the throttling API.
+            match self.get_job(id).await {
                 Ok(Some(job)) => {
                     match job.state {
                         job::State::Running => self.update_log(id, &mut offset).await,
@@ -365,7 +388,7 @@ impl JobHandler for Run {
             let filename = format!("{}_log.yaml", id);
             let mut file = upload.file(filename.clone()).await;
             outputln!("Uploading {}", filename);
-            let mut log = self.lava.log(*id).raw();
+            let mut log = self.lava.log(*id).await.raw();
 
             while let Some(bytes) = log.next().await {
                 match bytes {
@@ -383,6 +406,13 @@ impl JobHandler for Run {
         }
         Ok(())
     }
+}
+
+type LavaMap = Arc<Mutex<BTreeMap<(String, String), Arc<ThrottledLava>>>>;
+
+lazy_static! {
+    static ref LAVA_MAP: LavaMap = Arc::new(Mutex::new(BTreeMap::new()));
+    static ref MAX_CONCURRENT_REQUESTS: Arc<Mutex<usize>> = Arc::new(Mutex::new(20));
 }
 
 async fn new_job(job: Job) -> Result<impl JobHandler, ()> {
@@ -411,11 +441,30 @@ async fn new_job(job: Job) -> Result<impl JobHandler, ()> {
         }
     };
 
-    let lava = match Lava::new(lava_url.value(), Some(lava_token.value().to_string())) {
-        Ok(l) => l,
-        Err(e) => {
-            outputln!("Failed to setup lava: {}", e);
-            return Err(());
+    let max_requests = {
+        let m = MAX_CONCURRENT_REQUESTS.lock().unwrap();
+        *m
+    };
+
+    let lava = match LAVA_MAP
+        .lock()
+        .unwrap()
+        .entry((lava_url.value().to_string(), lava_token.value().to_string()))
+    {
+        Entry::Occupied(o) => o.get().clone(),
+        Entry::Vacant(v) => {
+            match Lava::new(lava_url.value(), Some(lava_token.value().to_string())) {
+                Ok(lava) => {
+                    let throttled =
+                        Arc::new(ThrottledLava::new(lava, Throttler::new(max_requests)));
+                    v.insert(throttled.clone());
+                    throttled
+                }
+                Err(e) => {
+                    outputln!("Failed to setup lava: {}", e);
+                    return Err(());
+                }
+            }
         }
     };
 
@@ -440,6 +489,15 @@ async fn main() {
         .with(layer)
         .with(tracing_subscriber::fmt::Layer::new().with_filter(log_targets))
         .init();
+
+    {
+        let mut max_requests = MAX_CONCURRENT_REQUESTS.lock().unwrap();
+        *max_requests = opts.max_concurrent_requests;
+        info!(
+            "Setting max concurrent requests to {}",
+            opts.max_concurrent_requests
+        );
+    }
 
     runner
         .run(new_job, 64)
