@@ -240,6 +240,11 @@ impl ThrottledLava {
         job::submit_job(&self.inner, definition).await
     }
 
+    pub async fn cancel_job(&self, job: i64) -> Result<(), job::CancellationError> {
+        let _permit = self.throttler.acquire("cancel_job").await;
+        job::cancel_job(&self.inner, job).await
+    }
+
     pub async fn workers(&self) -> Throttled<Paginator<Worker>> {
         let permit = self.throttler.acquire("workers").await;
         Throttled::new(self.inner.workers(), permit)
