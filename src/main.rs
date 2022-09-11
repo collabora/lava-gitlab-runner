@@ -11,7 +11,7 @@ use futures::StreamExt;
 use gitlab_runner::job::Job;
 use gitlab_runner::outputln;
 use gitlab_runner::uploader::Uploader;
-use gitlab_runner::{JobHandler, JobResult, Phase, Runner};
+use gitlab_runner::{CancellableJobHandler, JobResult, Phase, Runner};
 use handlebars::Handlebars;
 use lava_api::job::Health;
 use lava_api::joblog::{JobLogError, JobLogLevel, JobLogMsg};
@@ -23,6 +23,7 @@ use rand::random;
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use tracing::{debug, info};
 use tracing_subscriber::filter;
@@ -233,16 +234,28 @@ fn color_for_level(lvl: &JobLogLevel) -> Color {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum JobCancelBehaviour {
+    CancelLava,
+    LeaveRunning,
+}
+
 struct Run {
     lava: Arc<ThrottledLava>,
     job: Job,
     url: Url,
     masker: Masker,
     ids: Vec<i64>,
+    cancel_behaviour: Option<JobCancelBehaviour>,
 }
 
 impl Run {
-    fn new(lava: Arc<ThrottledLava>, url: Url, job: Job) -> Self {
+    fn new(
+        lava: Arc<ThrottledLava>,
+        url: Url,
+        job: Job,
+        cancel_behaviour: Option<JobCancelBehaviour>,
+    ) -> Self {
         let masked = job
             .variables()
             .filter(|v| v.masked())
@@ -256,6 +269,7 @@ impl Run {
             job,
             masker,
             ids: Vec::new(),
+            cancel_behaviour,
         }
     }
 
@@ -411,7 +425,29 @@ impl Run {
         }
     }
 
-    async fn wait_for_jobs(&self, mut ids: HashSet<i64>) -> JobResult {
+    async fn cancel_job(
+        &self,
+        default_behaviour: JobCancelBehaviour,
+        job_id: i64,
+    ) -> Result<(), job::CancellationError> {
+        match self.cancel_behaviour.unwrap_or(default_behaviour) {
+            JobCancelBehaviour::CancelLava => {
+                info!("Cancelling LAVA job {}", job_id);
+                self.lava.cancel_job(job_id).await
+            }
+            JobCancelBehaviour::LeaveRunning => {
+                info!("Not cancelling LAVA job {}, leaving it running", job_id);
+                Ok(())
+            }
+        }
+    }
+
+    async fn wait_for_jobs(
+        &self,
+        mut ids: HashSet<i64>,
+        cancel_token: &CancellationToken,
+        cancel_behaviour: JobCancelBehaviour,
+    ) -> JobResult {
         let mut running = HashSet::new();
         let mut failures = false;
         let mut timeout = MonitorTimeout::new(Duration::from_secs(30), Duration::from_secs(600));
@@ -441,6 +477,20 @@ impl Run {
                             failures = true;
                         }
                     }
+                    if cancel_token.is_cancelled() {
+                        match job.state {
+                            job::State::Finished | job::State::Canceling => {}
+                            _ => match self.cancel_job(cancel_behaviour, job.id).await {
+                                Ok(_) => {
+                                    outputln!("Cancelled LAVA job {}", job.id);
+                                    ids.remove(&job.id);
+                                }
+                                Err(e) => {
+                                    outputln!("Error cancelling LAVA job {}: {}", job.id, e);
+                                }
+                            },
+                        }
+                    }
                 }
             }
 
@@ -459,7 +509,12 @@ impl Run {
         jobs.try_next().await
     }
 
-    async fn follow_job(&self, id: i64) -> JobResult {
+    async fn follow_job(
+        &self,
+        id: i64,
+        cancel_token: &CancellationToken,
+        cancel_behaviour: JobCancelBehaviour,
+    ) -> JobResult {
         let mut offset = 0u64;
         loop {
             // `get_job` is a separate function in order to limit the
@@ -486,6 +541,20 @@ impl Run {
                         _ => (),
                     }
                     self.update_log(id, &mut offset).await;
+                    if cancel_token.is_cancelled() {
+                        match job.state {
+                            job::State::Finished | job::State::Canceling => {}
+                            _ => match self.cancel_job(cancel_behaviour, id).await {
+                                Ok(_) => {
+                                    outputln!("Cancelled LAVA job {}", id);
+                                    return Ok(());
+                                }
+                                Err(e) => {
+                                    outputln!("Error cancelling LAVA job {}: {}", id, e);
+                                }
+                            },
+                        }
+                    }
                 }
                 Ok(None) => {
                     outputln!("Lava doesn't know about our job?");
@@ -521,7 +590,7 @@ impl Run {
         })
     }
 
-    async fn command(&mut self, command: &str) -> JobResult {
+    async fn command(&mut self, command: &str, cancel_token: &CancellationToken) -> JobResult {
         outputln!("> {}", command);
         let mut p = command.split_whitespace();
         if let Some(cmd) = p.next() {
@@ -539,7 +608,8 @@ impl Run {
                         };
                         let ids = self.submit_definition(&definition).await?;
                         self.ids.extend(&ids);
-                        self.follow_job(ids[0]).await
+                        self.follow_job(ids[0], cancel_token, JobCancelBehaviour::CancelLava)
+                            .await
                     } else {
                         outputln!("Missing file to submit");
                         Err(())
@@ -568,7 +638,8 @@ impl Run {
                             outputln!("\t* {}", self.url_for_id(*id));
                         }
                         outputln!("");
-                        self.wait_for_jobs(ids).await
+                        self.wait_for_jobs(ids, cancel_token, JobCancelBehaviour::LeaveRunning)
+                            .await
                     } else {
                         outputln!("Missing file to submit");
                         Err(())
@@ -587,10 +658,15 @@ impl Run {
 }
 
 #[async_trait::async_trait]
-impl JobHandler for Run {
-    async fn step(&mut self, script: &[String], _phase: Phase) -> JobResult {
+impl CancellableJobHandler for Run {
+    async fn step(
+        &mut self,
+        script: &[String],
+        _phase: Phase,
+        cancel_token: &CancellationToken,
+    ) -> JobResult {
         for command in script {
-            self.command(command).await?;
+            self.command(command, cancel_token).await?;
         }
 
         Ok(())
@@ -637,7 +713,7 @@ lazy_static! {
     static ref MAX_CONCURRENT_REQUESTS: Arc<Mutex<usize>> = Arc::new(Mutex::new(20));
 }
 
-async fn new_job(job: Job) -> Result<impl JobHandler, ()> {
+async fn new_job(job: Job) -> Result<impl CancellableJobHandler, ()> {
     info!("Creating new run for job: {}", job.id());
     let lava_url = match job.variable("LAVA_URL") {
         Some(u) => u,
@@ -661,6 +737,25 @@ async fn new_job(job: Job) -> Result<impl JobHandler, ()> {
             outputln!("LAVA_URL is invalid: {}", e);
             return Err(());
         }
+    };
+
+    let cancel_behaviour = match job
+        .variable("LAVA_CANCELLATION")
+        .map(|v| match v.value().to_lowercase().as_str() {
+            "cancel" => Ok(JobCancelBehaviour::CancelLava),
+            "ignore" => Ok(JobCancelBehaviour::LeaveRunning),
+            _ => {
+                outputln!(
+                    "Bad value '{}' for LAVA_CANCELLATION: must be 'ignore' or 'cancel'",
+                    v.value()
+                );
+                Err(())
+            }
+        })
+        .transpose()
+    {
+        Ok(v) => v,
+        Err(_) => return Err(()),
     };
 
     let max_requests = {
@@ -690,7 +785,7 @@ async fn new_job(job: Job) -> Result<impl JobHandler, ()> {
         }
     };
 
-    Ok(Run::new(lava, url, job))
+    Ok(Run::new(lava, url, job, cancel_behaviour))
 }
 
 #[tokio::main]
