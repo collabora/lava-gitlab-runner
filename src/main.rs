@@ -4,6 +4,7 @@ use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use colored::{Color, Colorize};
 use futures::stream::TryStreamExt;
 use futures::AsyncWriteExt;
 use futures::StreamExt;
@@ -13,7 +14,7 @@ use gitlab_runner::uploader::Uploader;
 use gitlab_runner::{JobHandler, JobResult, Phase, Runner};
 use handlebars::Handlebars;
 use lava_api::job::Health;
-use lava_api::joblog::JobLogError;
+use lava_api::joblog::{JobLogError, JobLogLevel, JobLogMsg};
 use lava_api::paginator::PaginationError;
 use lava_api::{job, Lava};
 use lazy_static::lazy_static;
@@ -104,6 +105,130 @@ struct TransformVariables<'a> {
     pub job: BTreeMap<&'a str, &'a str>,
 }
 
+#[derive(Debug)]
+struct DisplayBox {
+    width: usize,
+    fg: Color,
+}
+
+impl DisplayBox {
+    pub fn new(width: usize, fg: Color) -> Self {
+        Self::edge(width, true, fg);
+        Self { width, fg }
+    }
+
+    pub fn line<S, T>(&self, key: S, value: T)
+    where
+        S: AsRef<str>,
+        T: AsRef<str>,
+    {
+        let kl = key.as_ref().len();
+        let vl = value.as_ref().len();
+        let total = kl + vl + 6; // two vertical bars, two edge spaces, colon space in centre
+        let spacing = if total < self.width {
+            self.width - total
+        } else {
+            0
+        };
+        let mut spacer = String::new();
+        for _ in 0..spacing {
+            spacer.push(' ');
+        }
+        let line = format!("| {}: {}{} |", key.as_ref(), value.as_ref(), spacer).color(self.fg);
+        outputln!("{}", line);
+    }
+
+    pub fn end(self) {
+        Self::edge(self.width, false, self.fg);
+    }
+
+    fn edge(width: usize, top: bool, fg: Color) {
+        let mut line = String::new();
+        let hyphens = if width > 2 { width - 2 } else { 0 };
+        if top {
+            line.push('/');
+        } else {
+            line.push('\\');
+        }
+
+        for _ in 0..hyphens {
+            line.push('-');
+        }
+
+        if top {
+            line.push('\\');
+        } else {
+            line.push('/');
+        }
+        outputln!("{}", line.color(fg));
+    }
+}
+
+fn format_value(v: &serde_yaml::Value) -> String {
+    match v {
+        serde_yaml::Value::Null => "null".to_string(),
+        serde_yaml::Value::Bool(b) => b.to_string(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        serde_yaml::Value::String(s) => format!("\"{}\"", s),
+        serde_yaml::Value::Sequence(seq) => {
+            let mut s = String::new();
+            s.push_str("[ ");
+            let mut first = true;
+            for item in seq.iter() {
+                if !first {
+                    s.push_str(", ");
+                    first = false;
+                }
+                s.push_str(&format_value(item));
+            }
+            s.push_str(" ]");
+            s
+        }
+        serde_yaml::Value::Mapping(map) => {
+            let mut s = String::new();
+            s.push_str("{ ");
+            let mut first = true;
+            for (k, v) in map.iter() {
+                if !first {
+                    s.push_str(", ");
+                    first = false;
+                }
+                s = format!("{}{}: {}", s, format_value(k), format_value(v));
+            }
+            s.push_str(" }");
+            s
+        }
+    }
+}
+
+fn abbreviate_level(lvl: &JobLogLevel) -> &'static str {
+    match lvl {
+        JobLogLevel::Debug => "debug =>",
+        JobLogLevel::Info => " info =>",
+        JobLogLevel::Warning => " WARN =>",
+        JobLogLevel::Error => "ERROR =>",
+        JobLogLevel::Results => "  res =>",
+        JobLogLevel::Target => "  OUT =>",
+        JobLogLevel::Input => "   IN <=",
+        JobLogLevel::Feedback => "fdbak =>",
+        JobLogLevel::Exception => "EXCPT =>",
+    }
+}
+
+fn color_for_level(lvl: &JobLogLevel) -> Color {
+    match lvl {
+        JobLogLevel::Debug => Color::Cyan,
+        JobLogLevel::Info => Color::BrightBlue,
+        JobLogLevel::Warning => Color::Yellow,
+        JobLogLevel::Error => Color::Red,
+        JobLogLevel::Results => Color::Green,
+        JobLogLevel::Target => Color::White,
+        JobLogLevel::Input => Color::BrightMagenta,
+        JobLogLevel::Feedback => Color::Green,
+        JobLogLevel::Exception => Color::BrightRed,
+    }
+}
+
 struct Run {
     lava: Arc<ThrottledLava>,
     job: Job,
@@ -181,12 +306,68 @@ impl Run {
         while let Some(entry) = log.next().await {
             match entry {
                 Ok(entry) => {
-                    outputln!("{} {:?}", entry.dt, entry.msg);
+                    match entry.msg {
+                        JobLogMsg::Msg(s) => {
+                            let fg = color_for_level(&entry.lvl);
+                            outputln!(
+                                "{} {}",
+                                entry.dt.format("%Y-%m-%d %H:%M:%S%.6f"),
+                                format!("{} {}", abbreviate_level(&entry.lvl), s)
+                                    .color(fg)
+                            );
+                        }
+                        JobLogMsg::Msgs(ss) => {
+                            let fg = color_for_level(&entry.lvl);
+                            for s in ss {
+                                outputln!(
+                                    "{} {}",
+                                    entry.dt.format("%Y-%m-%d %H:%M:%S%.6f"),
+                                    format!("{} {}", abbreviate_level(&entry.lvl), s)
+                                        .color(fg)
+                                );
+                            }
+                        }
+                        JobLogMsg::Result(res) => {
+                            let fg = match res.result.as_str() {
+                                "pass" => color_for_level(&JobLogLevel::Results),
+                                "fail" => color_for_level(&JobLogLevel::Error),
+                                _ => color_for_level(&JobLogLevel::Warning),
+                            };
+
+                            let b = DisplayBox::new(70, fg);
+                            b.line("case", res.case);
+                            b.line("definition", res.definition);
+                            if let Some(ns) = res.namespace {
+                                b.line("namespace", ns);
+                            }
+                            if let Some(level) = res.level {
+                                b.line("level", level);
+                            }
+                            b.line("result", res.result);
+                            if let Some(duration) = res.duration {
+                                b.line(
+                                    "duration",
+                                    format!(
+                                        "{}.{:0>9}",
+                                        duration.as_secs(),
+                                        duration.subsec_nanos()
+                                    ),
+                                );
+                            }
+                            for (k, v) in res.extra.iter() {
+                                b.line(k, format_value(v));
+                            }
+                            b.end();
+                        }
+                    }
                     *offset += 1;
                 }
                 Err(JobLogError::NoData) => (),
                 Err(JobLogError::ParseError(s, e)) => {
-                    outputln!("Couldn't parse {} - {}", s.trim_end(), e);
+                    outputln!(
+                        "{}",
+                        format!("Couldn't parse {} - {}", s.trim_end(), e).bright_red()
+                    );
                     *offset += 1;
                 }
                 Err(e) => {
