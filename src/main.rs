@@ -18,6 +18,7 @@ use lava_api::joblog::{JobLogError, JobLogLevel, JobLogMsg};
 use lava_api::paginator::PaginationError;
 use lava_api::{job, Lava};
 use lazy_static::lazy_static;
+use masker::Masker;
 use rand::random;
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
@@ -30,6 +31,8 @@ use url::Url;
 
 mod throttled;
 use throttled::{ThrottledLava, Throttler};
+
+const MASK_PATTERN: &str = "[MASKED]";
 
 #[derive(Debug, Clone)]
 struct MonitorTimeout {
@@ -233,15 +236,24 @@ struct Run {
     lava: Arc<ThrottledLava>,
     job: Job,
     url: Url,
+    masker: Masker,
     ids: Vec<i64>,
 }
 
 impl Run {
     fn new(lava: Arc<ThrottledLava>, url: Url, job: Job) -> Self {
+        let masked = job
+            .variables()
+            .filter(|v| v.masked())
+            .map(|v| v.value())
+            .collect::<Vec<_>>();
+        let masker = Masker::new(&masked, MASK_PATTERN);
+
         Self {
             lava,
             url,
             job,
+            masker,
             ids: Vec::new(),
         }
     }
@@ -301,6 +313,10 @@ impl Run {
         }
     }
 
+    fn mask_variables(&self, msg: &str) -> String {
+        self.masker.mask_str(msg)
+    }
+
     async fn update_log(&self, id: i64, offset: &mut u64) {
         let mut log = self.lava.log(id).await.start(*offset).log();
         while let Some(entry) = log.next().await {
@@ -312,8 +328,12 @@ impl Run {
                             outputln!(
                                 "{} {}",
                                 entry.dt.format("%Y-%m-%d %H:%M:%S%.6f"),
-                                format!("{} {}", abbreviate_level(&entry.lvl), s)
-                                    .color(fg)
+                                format!(
+                                    "{} {}",
+                                    abbreviate_level(&entry.lvl),
+                                    self.mask_variables(&s)
+                                )
+                                .color(fg)
                             );
                         }
                         JobLogMsg::Msgs(ss) => {
@@ -322,8 +342,12 @@ impl Run {
                                 outputln!(
                                     "{} {}",
                                     entry.dt.format("%Y-%m-%d %H:%M:%S%.6f"),
-                                    format!("{} {}", abbreviate_level(&entry.lvl), s)
-                                        .color(fg)
+                                    format!(
+                                        "{} {}",
+                                        abbreviate_level(&entry.lvl),
+                                        self.mask_variables(&s)
+                                    )
+                                    .color(fg)
                                 );
                             }
                         }
@@ -335,15 +359,15 @@ impl Run {
                             };
 
                             let b = DisplayBox::new(70, fg);
-                            b.line("case", res.case);
-                            b.line("definition", res.definition);
+                            b.line("case", self.mask_variables(&res.case));
+                            b.line("definition", self.mask_variables(&res.definition));
                             if let Some(ns) = res.namespace {
-                                b.line("namespace", ns);
+                                b.line("namespace", self.mask_variables(&ns));
                             }
                             if let Some(level) = res.level {
-                                b.line("level", level);
+                                b.line("level", self.mask_variables(&level));
                             }
-                            b.line("result", res.result);
+                            b.line("result", self.mask_variables(&res.result));
                             if let Some(duration) = res.duration {
                                 b.line(
                                     "duration",
@@ -355,7 +379,10 @@ impl Run {
                                 );
                             }
                             for (k, v) in res.extra.iter() {
-                                b.line(k, format_value(v));
+                                b.line(
+                                    self.mask_variables(k),
+                                    self.mask_variables(&format_value(v)),
+                                );
                             }
                             b.end();
                         }
@@ -366,7 +393,12 @@ impl Run {
                 Err(JobLogError::ParseError(s, e)) => {
                     outputln!(
                         "{}",
-                        format!("Couldn't parse {} - {}", s.trim_end(), e).bright_red()
+                        format!(
+                            "Couldn't parse {} - {}",
+                            self.mask_variables(s.trim_end()),
+                            self.mask_variables(&e.to_string())
+                        )
+                        .bright_red()
                     );
                     *offset += 1;
                 }
@@ -571,9 +603,11 @@ impl JobHandler for Run {
             outputln!("Uploading {}", filename);
             let mut log = self.lava.log(*id).await.raw();
 
+            let mut cm = self.masker.mask_chunks();
             while let Some(bytes) = log.next().await {
                 match bytes {
                     Ok(b) => {
+                        let b = cm.mask_chunk(&b);
                         if let Err(e) = file.write_all(&b).await {
                             outputln!("Failed to write to jog log file {}", e);
                         }
@@ -582,6 +616,12 @@ impl JobHandler for Run {
                         outputln!("Couldn't read log {}", e);
                         return Err(());
                     }
+                }
+            }
+            {
+                let b = cm.finish();
+                if let Err(e) = file.write_all(&b).await {
+                    outputln!("Failed to write to job log file {}", e);
                 }
             }
         }
