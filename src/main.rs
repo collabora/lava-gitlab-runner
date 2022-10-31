@@ -201,6 +201,7 @@ fn format_value(v: &serde_yaml::Value) -> String {
             s.push_str(" }");
             s
         }
+        serde_yaml::Value::Tagged(t) => format!("{}: {}", t.tag, format_value(&t.value)),
     }
 }
 
