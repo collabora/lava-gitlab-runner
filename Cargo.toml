@@ -11,7 +11,7 @@ repository = "https://gitlab.collabora.com/lava/lava-gitlab-runner.git"
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 colored = "2"
-gitlab-runner = "0.0.6"
+gitlab-runner = "0.0.7"
 lava-api = "0.1.0"
 lazy_static = "1.4"
 structopt = "0.3.23"
