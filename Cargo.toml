@@ -12,7 +12,7 @@ repository = "https://gitlab.collabora.com/lava/lava-gitlab-runner.git"
 chrono = { version = "0.4", features = ["serde"] }
 colored = "2"
 gitlab-runner = "0.0.6"
-lava-api = { git = "https://gitlab.collabora.com/lava/lava-api.git", branch = "wip/sjoerd/job-logs-2" }
+lava-api = "0.1.0"
 lazy_static = "1.4"
 structopt = "0.3.23"
 url = "2.2.2"
@@ -23,9 +23,8 @@ handlebars = "4"
 masker = "0.0.1"
 serde = { version = "^1.0.97", features = ["derive"] }
 serde_json = "1.0.68"
-serde_yaml = "0.8.21"
+serde_yaml = "0.9"
 rand = "0.8.4"
 tempfile = "3.3.0"
 tracing-subscriber = { version = "0.3.9", features = [ "env-filter"] }
 tracing = "0.1.31"
-
