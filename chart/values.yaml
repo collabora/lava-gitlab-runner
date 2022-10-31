@@ -16,7 +16,7 @@ gitlab:
   # token: 12345
 
 image:
-  repository: registry.gitlab.collabora.com/lava/lava-gitlab-runner/main
+  repository: docker pull ghcr.io/collabora/lava-gitlab-runner:v0.1.0
   pullPolicy: Always
   # Overrides the image tag whose default is the chart appVersion.
   tag: "latest"
