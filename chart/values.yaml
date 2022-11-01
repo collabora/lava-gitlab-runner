@@ -16,10 +16,10 @@ gitlab:
   # token: 12345
 
 image:
-  repository: docker pull ghcr.io/collabora/lava-gitlab-runner:v0.2.1
+  repository: ghcr.io/collabora/lava-gitlab-runner
   pullPolicy: Always
   # Overrides the image tag whose default is the chart appVersion.
-  tag: "latest"
+  tag: "v0.2.2"
 
 imagePullSecrets: []
 nameOverride: ""
