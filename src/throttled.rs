@@ -279,6 +279,21 @@ impl<'a, T> core::ops::DerefMut for Throttled<'a, T> {
     }
 }
 
+impl<'a, T> futures::stream::Stream for Throttled<'a, T>
+where
+    T: futures::stream::Stream + Unpin,
+{
+    type Item = <T as futures::stream::Stream>::Item;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        T::poll_next(std::pin::Pin::new(&mut this.inner), cx)
+    }
+}
+
 pub struct ThrottledJobLogBuilder<'a> {
     inner: JobLogBuilder<'a>,
     _permit: Permit<'a>,
