@@ -1,6 +1,8 @@
 use chrono::Utc;
+use futures::Stream;
 use tokio::sync::{Semaphore, SemaphorePermit, TryAcquireError};
 
+use bytes::Bytes;
 use lava_api::device::Devices;
 use lava_api::job::{self, Jobs, JobsBuilder};
 use lava_api::joblog::{JobLog, JobLogBuilder, JobLogRaw};
@@ -243,6 +245,14 @@ impl ThrottledLava {
     pub async fn cancel_job(&self, job: i64) -> Result<(), job::CancellationError> {
         let _permit = self.throttler.acquire("cancel_job").await;
         job::cancel_job(&self.inner, job).await
+    }
+
+    pub async fn job_results_as_junit(
+        &self,
+        id: i64,
+    ) -> Result<impl Stream<Item = Result<Bytes, job::ResultsError>> + '_, job::ResultsError> {
+        let _permit = self.throttler.acquire("job_results").await;
+        job::job_results_as_junit(&self.inner, id).await
     }
 
     pub async fn workers(&self) -> Throttled<Paginator<Worker>> {

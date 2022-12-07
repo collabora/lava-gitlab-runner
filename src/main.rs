@@ -5,10 +5,10 @@ use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use colored::{Color, Colorize};
 use futures::stream::{Stream, TryStreamExt};
-use futures::{AsyncRead, FutureExt, StreamExt};
+use futures::{AsyncRead, AsyncReadExt, FutureExt, StreamExt};
 use gitlab_runner::job::Job;
 use gitlab_runner::outputln;
 use gitlab_runner::{CancellableJobHandler, JobResult, Phase, Runner, UploadableFile};
@@ -253,7 +253,7 @@ impl LocalArtifactStore {
     pub fn get_log(
         &self,
         id: i64,
-    ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Unpin + '_ {
+    ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Unpin + Send + '_ {
         self.masker.mask_stream(Box::pin(
             self.lava
                 .log(id)
@@ -262,11 +262,40 @@ impl LocalArtifactStore {
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
         ))
     }
+
+    pub fn get_junit(
+        &self,
+        id: i64,
+    ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Unpin + Send + '_ {
+        Box::pin(
+            self.lava
+                .job_results_as_junit(id)
+                .map(|res| match res {
+                    Ok(s) => s
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                        .boxed(),
+                    Err(e) => futures::stream::once(async move {
+                        Err(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    })
+                    .boxed(),
+                })
+                .flatten_stream(),
+        )
+    }
+
+    pub fn get_full_junit(
+        &self,
+        ids: Vec<i64>,
+    ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Unpin + Send + '_ {
+        self.get_junit(ids[0])
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Ord, PartialOrd)]
 enum LavaUploadableFileType {
     Log { id: i64 },
+    Junit { id: i64 },
+    FullJunit { ids: Vec<i64> },
 }
 
 #[derive(Clone)]
@@ -308,6 +337,20 @@ impl LavaUploadableFile {
             store,
         }
     }
+
+    pub fn junit(id: i64, store: Arc<LocalArtifactStore>) -> Self {
+        Self {
+            which: LavaUploadableFileType::Junit { id },
+            store,
+        }
+    }
+
+    pub fn full_junit(ids: Vec<i64>, store: Arc<LocalArtifactStore>) -> Self {
+        Self {
+            which: LavaUploadableFileType::FullJunit { ids },
+            store,
+        }
+    }
 }
 
 impl UploadableFile for LavaUploadableFile {
@@ -316,6 +359,8 @@ impl UploadableFile for LavaUploadableFile {
     fn get_path(&self) -> Cow<'_, str> {
         match self.which {
             LavaUploadableFileType::Log { id } => format!("{}_log.yaml", id).into(),
+            LavaUploadableFileType::Junit { id } => format!("{}_junit.xml", id).into(),
+            LavaUploadableFileType::FullJunit { .. } => "junit.xml".into(),
         }
     }
 
@@ -324,6 +369,12 @@ impl UploadableFile for LavaUploadableFile {
         match &self.which {
             LavaUploadableFileType::Log { id } => {
                 Box::new(self.store.get_log(*id).into_async_read())
+            }
+            LavaUploadableFileType::Junit { id } => {
+                Box::new(self.store.get_junit(*id).into_async_read())
+            }
+            LavaUploadableFileType::FullJunit { ids } => {
+                Box::new(self.store.get_full_junit(ids.clone()).into_async_read())
             }
         }
     }
@@ -595,6 +646,29 @@ impl Run {
         }
     }
 
+    async fn all_tests_passed(&self, id: i64) -> Result<bool, ()> {
+        let mut bytes = Vec::new();
+        Box::pin(
+            self.lava
+                .job_results_as_junit(id)
+                .await
+                .map_err(|_| ())?
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+        )
+        .into_async_read()
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| {
+            outputln!("Failed to get job results: {}", e);
+        })?;
+
+        let ts = junit_parser::from_reader(bytes.reader()).map_err(|e| {
+            outputln!("Failed to parse job results: {}", e);
+        })?;
+
+        Ok(ts.errors == 0 && ts.failures == 0)
+    }
+
     async fn get_job(&self, id: i64) -> Result<Option<job::Job>, PaginationError> {
         let mut jobs = self.lava.jobs().await.id(id).query();
         jobs.try_next().await
@@ -623,7 +697,16 @@ impl Run {
                             self.update_log(id, &mut offset).await;
 
                             if job.health == Health::Complete {
-                                return Ok(());
+                                match self.all_tests_passed(id).await {
+                                    Ok(true) => {
+                                        return Ok(());
+                                    }
+                                    Ok(false) => {
+                                        outputln!("Job completed with errors");
+                                        return Err(());
+                                    }
+                                    Err(_) => return Err(()),
+                                };
                             } else {
                                 outputln!("Job didn't complete correctly");
                                 return Err(());
@@ -769,6 +852,13 @@ impl CancellableJobHandler<LavaUploadableFile> for Run {
         let mut available_files = Vec::new();
         for id in &self.ids {
             available_files.push(LavaUploadableFile::log(*id, self.store.clone()));
+            available_files.push(LavaUploadableFile::junit(*id, self.store.clone()));
+        }
+        if self.ids.len() == 1 {
+            available_files.push(LavaUploadableFile::full_junit(
+                self.ids.clone(),
+                self.store.clone(),
+            ));
         }
         Ok(Box::new(available_files.into_iter()))
     }
