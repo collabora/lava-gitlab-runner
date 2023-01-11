@@ -1,17 +1,17 @@
+use std::borrow::Cow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bytes::{Buf, Bytes};
 use colored::{Color, Colorize};
-use futures::stream::TryStreamExt;
-use futures::AsyncWriteExt;
-use futures::StreamExt;
+use futures::stream::{Stream, TryStreamExt};
+use futures::{AsyncRead, AsyncReadExt, FutureExt, StreamExt};
 use gitlab_runner::job::Job;
 use gitlab_runner::outputln;
-use gitlab_runner::uploader::Uploader;
-use gitlab_runner::{CancellableJobHandler, JobResult, Phase, Runner};
+use gitlab_runner::{CancellableJobHandler, JobResult, Phase, Runner, UploadableFile};
 use handlebars::Handlebars;
 use lava_api::job::Health;
 use lava_api::joblog::{JobLogError, JobLogLevel, JobLogMsg};
@@ -240,17 +240,158 @@ enum JobCancelBehaviour {
     LeaveRunning,
 }
 
+struct LocalArtifactStore {
+    lava: Arc<ThrottledLava>,
+    masker: Arc<Masker>,
+}
+
+impl LocalArtifactStore {
+    pub fn new(lava: Arc<ThrottledLava>, masker: Arc<Masker>) -> Self {
+        Self { lava, masker }
+    }
+
+    pub fn get_log(
+        &self,
+        id: i64,
+    ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Unpin + Send + '_ {
+        self.masker.mask_stream(Box::pin(
+            self.lava
+                .log(id)
+                .map(|x| x.raw())
+                .flatten_stream()
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+        ))
+    }
+
+    pub fn get_junit(
+        &self,
+        id: i64,
+    ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Unpin + Send + '_ {
+        Box::pin(
+            self.lava
+                .job_results_as_junit(id)
+                .map(|res| match res {
+                    Ok(s) => s
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                        .boxed(),
+                    Err(e) => futures::stream::once(async move {
+                        Err(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    })
+                    .boxed(),
+                })
+                .flatten_stream(),
+        )
+    }
+
+    pub fn get_full_junit(
+        &self,
+        ids: Vec<i64>,
+    ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Unpin + Send + '_ {
+        self.get_junit(ids[0])
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Ord, PartialOrd)]
+enum LavaUploadableFileType {
+    Log { id: i64 },
+    Junit { id: i64 },
+    FullJunit { ids: Vec<i64> },
+}
+
+#[derive(Clone)]
+struct LavaUploadableFile {
+    store: Arc<LocalArtifactStore>,
+    which: LavaUploadableFileType,
+}
+
+impl core::fmt::Debug for LavaUploadableFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        self.which.fmt(f)
+    }
+}
+
+impl core::cmp::PartialEq for LavaUploadableFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.which.eq(&other.which)
+    }
+}
+
+impl core::cmp::Eq for LavaUploadableFile {}
+
+impl core::cmp::PartialOrd for LavaUploadableFile {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        self.which.partial_cmp(&other.which)
+    }
+}
+
+impl core::cmp::Ord for LavaUploadableFile {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.which.cmp(&other.which)
+    }
+}
+
+impl LavaUploadableFile {
+    pub fn log(id: i64, store: Arc<LocalArtifactStore>) -> Self {
+        Self {
+            which: LavaUploadableFileType::Log { id },
+            store,
+        }
+    }
+
+    pub fn junit(id: i64, store: Arc<LocalArtifactStore>) -> Self {
+        Self {
+            which: LavaUploadableFileType::Junit { id },
+            store,
+        }
+    }
+
+    pub fn full_junit(ids: Vec<i64>, store: Arc<LocalArtifactStore>) -> Self {
+        Self {
+            which: LavaUploadableFileType::FullJunit { ids },
+            store,
+        }
+    }
+}
+
+impl UploadableFile for LavaUploadableFile {
+    type Data<'a> = Box<dyn AsyncRead + Send + Unpin + 'a>;
+
+    fn get_path(&self) -> Cow<'_, str> {
+        match self.which {
+            LavaUploadableFileType::Log { id } => format!("{}_log.yaml", id).into(),
+            LavaUploadableFileType::Junit { id } => format!("{}_junit.xml", id).into(),
+            LavaUploadableFileType::FullJunit { .. } => "junit.xml".into(),
+        }
+    }
+
+    fn get_data<'a>(&'a self) -> Self::Data<'a> {
+        outputln!("Uploading {}", self.get_path());
+        match &self.which {
+            LavaUploadableFileType::Log { id } => {
+                Box::new(self.store.get_log(*id).into_async_read())
+            }
+            LavaUploadableFileType::Junit { id } => {
+                Box::new(self.store.get_junit(*id).into_async_read())
+            }
+            LavaUploadableFileType::FullJunit { ids } => {
+                Box::new(self.store.get_full_junit(ids.clone()).into_async_read())
+            }
+        }
+    }
+}
+
 struct Run {
     lava: Arc<ThrottledLava>,
+    store: Arc<LocalArtifactStore>,
     job: Job,
     url: Url,
-    masker: Masker,
+    masker: Arc<Masker>,
     ids: Vec<i64>,
     cancel_behaviour: Option<JobCancelBehaviour>,
 }
 
 impl Run {
-    fn new(
+    pub fn new(
         lava: Arc<ThrottledLava>,
         url: Url,
         job: Job,
@@ -261,10 +402,11 @@ impl Run {
             .filter(|v| v.masked())
             .map(|v| v.value())
             .collect::<Vec<_>>();
-        let masker = Masker::new(&masked, MASK_PATTERN);
+        let masker = Arc::new(Masker::new(&masked, MASK_PATTERN));
 
         Self {
-            lava,
+            lava: lava.clone(),
+            store: Arc::new(LocalArtifactStore::new(lava, masker.clone())),
             url,
             job,
             masker,
@@ -504,6 +646,29 @@ impl Run {
         }
     }
 
+    async fn all_tests_passed(&self, id: i64) -> Result<bool, ()> {
+        let mut bytes = Vec::new();
+        Box::pin(
+            self.lava
+                .job_results_as_junit(id)
+                .await
+                .map_err(|_| ())?
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+        )
+        .into_async_read()
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| {
+            outputln!("Failed to get job results: {}", e);
+        })?;
+
+        let ts = junit_parser::from_reader(bytes.reader()).map_err(|e| {
+            outputln!("Failed to parse job results: {}", e);
+        })?;
+
+        Ok(ts.errors == 0 && ts.failures == 0)
+    }
+
     async fn get_job(&self, id: i64) -> Result<Option<job::Job>, PaginationError> {
         let mut jobs = self.lava.jobs().await.id(id).query();
         jobs.try_next().await
@@ -532,7 +697,16 @@ impl Run {
                             self.update_log(id, &mut offset).await;
 
                             if job.health == Health::Complete {
-                                return Ok(());
+                                match self.all_tests_passed(id).await {
+                                    Ok(true) => {
+                                        return Ok(());
+                                    }
+                                    Ok(false) => {
+                                        outputln!("Job completed with errors");
+                                        return Err(());
+                                    }
+                                    Err(_) => return Err(()),
+                                };
                             } else {
                                 outputln!("Job didn't complete correctly");
                                 return Err(());
@@ -658,7 +832,7 @@ impl Run {
 }
 
 #[async_trait::async_trait]
-impl CancellableJobHandler for Run {
+impl CancellableJobHandler<LavaUploadableFile> for Run {
     async fn step(
         &mut self,
         script: &[String],
@@ -672,37 +846,21 @@ impl CancellableJobHandler for Run {
         Ok(())
     }
 
-    async fn upload_artifacts(&mut self, upload: &mut Uploader) -> JobResult {
-        outputln!("\n\nUploading logs:");
+    async fn get_uploadable_files(
+        &mut self,
+    ) -> Result<Box<dyn Iterator<Item = LavaUploadableFile> + Send>, ()> {
+        let mut available_files = Vec::new();
         for id in &self.ids {
-            let filename = format!("{}_log.yaml", id);
-            let mut file = upload.file(filename.clone()).await;
-            outputln!("Uploading {}", filename);
-            let mut log = self.lava.log(*id).await.raw();
-
-            let mut cm = self.masker.mask_chunks();
-            while let Some(bytes) = log.next().await {
-                match bytes {
-                    Ok(b) => {
-                        let b = cm.mask_chunk(&b);
-                        if let Err(e) = file.write_all(&b).await {
-                            outputln!("Failed to write to jog log file {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        outputln!("Couldn't read log {}", e);
-                        return Err(());
-                    }
-                }
-            }
-            {
-                let b = cm.finish();
-                if let Err(e) = file.write_all(&b).await {
-                    outputln!("Failed to write to job log file {}", e);
-                }
-            }
+            available_files.push(LavaUploadableFile::log(*id, self.store.clone()));
+            available_files.push(LavaUploadableFile::junit(*id, self.store.clone()));
         }
-        Ok(())
+        if self.ids.len() == 1 {
+            available_files.push(LavaUploadableFile::full_junit(
+                self.ids.clone(),
+                self.store.clone(),
+            ));
+        }
+        Ok(Box::new(available_files.into_iter()))
     }
 }
 
@@ -713,7 +871,7 @@ lazy_static! {
     static ref MAX_CONCURRENT_REQUESTS: Arc<Mutex<usize>> = Arc::new(Mutex::new(20));
 }
 
-async fn new_job(job: Job) -> Result<impl CancellableJobHandler, ()> {
+async fn new_job(job: Job) -> Result<impl CancellableJobHandler<LavaUploadableFile>, ()> {
     info!("Creating new run for job: {}", job.id());
     let lava_url = match job.variable("LAVA_URL") {
         Some(u) => u,
