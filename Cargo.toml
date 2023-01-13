@@ -9,12 +9,14 @@ homepage = "https://gitlab.collabora.com/lava/lava-gitlab-runner"
 repository = "https://gitlab.collabora.com/lava/lava-gitlab-runner.git"
 
 [dependencies]
+axum = "0.6"
 bytes = "1.2.0"
 chrono = { version = "0.4", features = ["serde"] }
 colored = "2"
 gitlab-runner = "0.0.8"
 lava-api = "0.1.1"
 lazy_static = "1.4"
+local-ip-address = "0.5"
 structopt = "0.3.23"
 url = "2.2.2"
 tokio = "1.12.0"
@@ -27,6 +29,7 @@ serde = { version = "^1.0.97", features = ["derive"] }
 serde_json = "1.0.68"
 serde_yaml = "0.9"
 rand = "0.8.4"
+rand_chacha = "0.3"
 tempfile = "3.3.0"
 tokio-util = { version = "0.7", features = [ "io" ] }
 tracing-subscriber = { version = "0.3.9", features = [ "env-filter"] }
