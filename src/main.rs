@@ -88,6 +88,8 @@ struct Opts {
     server: Url,
     #[structopt(env = "GITLAB_TOKEN")]
     token: String,
+    #[structopt(env = "RUNNER_SYSTEM_ID")]
+    system_id: String,
     #[structopt(short, long, env = "RUNNER_LOG")]
     log: Option<String>,
     #[structopt(
@@ -926,8 +928,12 @@ async fn main() {
     let opts = Opts::from_args();
     let dir = tempfile::tempdir().unwrap();
 
-    let (mut runner, layer) =
-        Runner::new_with_layer(opts.server, opts.token, dir.path().to_path_buf());
+    let (mut runner, layer) = Runner::new_with_layer(
+        opts.server,
+        opts.token,
+        opts.system_id,
+        dir.path().to_path_buf(),
+    );
 
     let log_targets: filter::Targets = if let Some(log) = opts.log {
         log.parse().unwrap()
