@@ -12,7 +12,7 @@ repository = "https://gitlab.collabora.com/lava/lava-gitlab-runner.git"
 bytes = "1.2.0"
 chrono = { version = "0.4", features = ["serde"] }
 colored = "2"
-gitlab-runner = "0.0.8"
+gitlab-runner = { git = "https://github.com/pinchartl/gitlab-runner-rs.git", branch = "runner-authentication-token" }
 lava-api = "0.1.1"
 lazy_static = "1.4"
 structopt = "0.3.23"
