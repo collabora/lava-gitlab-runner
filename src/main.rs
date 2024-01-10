@@ -312,7 +312,7 @@ impl core::cmp::Eq for LavaUploadableFile {}
 
 impl core::cmp::PartialOrd for LavaUploadableFile {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        self.which.partial_cmp(&other.which)
+        Some(self.cmp(other))
     }
 }
 
