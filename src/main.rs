@@ -348,7 +348,7 @@ impl UploadableFile for LavaUploadableFile {
         }
     }
 
-    fn get_data<'a>(&'a self) -> Self::Data<'a> {
+    fn get_data(&self) -> Self::Data<'_> {
         outputln!("Uploading {}", self.get_path());
         match &self.which {
             LavaUploadableFileType::Log { id } => {
