@@ -54,6 +54,16 @@ jobs:
           components: clippy
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
+  minimal-dependencies:
+    name: minimal direct dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+      - run: cargo check -Z direct-minimal-versions
+
   docker-image:
     name: Docker image build
     runs-on: ubuntu-latest
@@ -96,6 +106,7 @@ jobs:
       - test
       - clippy
       - docker-image
+      - minimal-dependencies
     runs-on: ubuntu-latest
     steps:
       - name: Decide whether the needed jobs succeeded or failed
