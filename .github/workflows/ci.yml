@@ -12,51 +12,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-      - uses: actions-rs/cargo@v1
-        with:
-          command: check
-          args: --all-features
+      - uses: dtolnay/rust-toolchain@1.70
+      - run: cargo check --all-targets --all-features
 
   fmt:
     name: cargo fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@1.70
         with:
-          toolchain: stable
-      - uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all --check
+          components: rustfmt
+      - run: cargo fmt --all --check
 
   test:
     name: cargo test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
+      - uses: dtolnay/rust-toolchain@1.70
+      - run: cargo test --all-targets --all-features
 
   clippy:
     name: cargo clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@1.70
         with:
-          toolchain: stable
-      - uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: -- -D warnings
+          components: clippy
+      - run: cargo clippy --all-targets --all-features -- -D warnings
 
   docker-image:
     name: Docker image build
