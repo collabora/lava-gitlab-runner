@@ -1,6 +1,10 @@
-on: [push, pull_request]
-
 name: CI
+on:
+  push:
+    branches-ignore:
+      - "gh-readonly-queue/**"
+  pull_request:
+  merge_group:
 
 env:
   REGISTRY: ghcr.io
