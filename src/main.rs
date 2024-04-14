@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,6 +22,7 @@ use masker::Masker;
 use rand::random;
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
+use strum::{Display, EnumString};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
@@ -82,6 +83,15 @@ fn monitor_timeout() {
     }
 }
 
+#[derive(Display, EnumString)]
+#[strum(serialize_all = "lowercase")]
+enum LogFormat {
+    Pretty,
+    Full,
+    Compact,
+    Json,
+}
+
 #[derive(StructOpt)]
 struct Opts {
     #[structopt(env = "GITLAB_URL")]
@@ -90,6 +100,8 @@ struct Opts {
     token: String,
     #[structopt(short, long, env = "RUNNER_LOG")]
     log: Option<String>,
+    #[structopt(long, env = "RUNNER_LOG_FORMAT")]
+    log_format: Option<LogFormat>,
     #[structopt(
         short,
         long,
@@ -936,9 +948,25 @@ async fn main() {
         filter::Targets::new().with_default(Level::INFO)
     };
 
+    let log_format = opts.log_format.unwrap_or_else(|| {
+        if std::io::stdout().is_terminal() {
+            LogFormat::Pretty
+        } else {
+            LogFormat::Json
+        }
+    });
+
+    let fmt = tracing_subscriber::fmt::Layer::new();
+    let fmt = match log_format {
+        LogFormat::Full => fmt.boxed(),
+        LogFormat::Pretty => fmt.pretty().boxed(),
+        LogFormat::Compact => fmt.compact().boxed(),
+        LogFormat::Json => fmt.json().boxed(),
+    };
+
     tracing_subscriber::Registry::default()
         .with(layer)
-        .with(tracing_subscriber::fmt::Layer::new().with_filter(log_targets))
+        .with(fmt.with_filter(log_targets))
         .init();
 
     {
