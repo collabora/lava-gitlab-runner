@@ -10,8 +10,8 @@ use colored::{Color, Colorize};
 use futures::stream::{Stream, TryStreamExt};
 use futures::{AsyncRead, AsyncReadExt, FutureExt, StreamExt};
 use gitlab_runner::job::Job;
-use gitlab_runner::outputln;
-use gitlab_runner::{CancellableJobHandler, JobResult, Phase, Runner, UploadableFile};
+use gitlab_runner::{outputln, GitlabLayer, RunnerBuilder};
+use gitlab_runner::{CancellableJobHandler, JobResult, Phase, UploadableFile};
 use handlebars::Handlebars;
 use lava_api::job::Health;
 use lava_api::joblog::{JobLogError, JobLogLevel, JobLogMsg};
@@ -926,11 +926,12 @@ async fn main() {
     let opts = Opts::from_args();
     let dir = tempfile::tempdir().unwrap();
 
-    let (mut runner, layer) =
-        Runner::new_with_layer(opts.server, opts.token, dir.path().to_path_buf());
+    let (layer, jobs) = GitlabLayer::new();
 
-    let log_targets: filter::Targets = if let Some(log) = opts.log {
-        log.parse().unwrap()
+    let log_targets = if let Some(log) = opts.log {
+        log.parse::<filter::Targets>()
+            .unwrap()
+            .with_target("gitlab_runner::gitlab::job", Level::ERROR)
     } else {
         filter::Targets::new().with_default(Level::INFO)
     };
@@ -948,6 +949,24 @@ async fn main() {
             opts.max_concurrent_requests
         );
     }
+
+    let mut runner = RunnerBuilder::new(opts.server, opts.token, dir.path(), jobs)
+        .version(env!("CARGO_PKG_VERSION"))
+        .revision(
+            option_env!("VERGEN_GIT_SHA")
+                .map(|sha| {
+                    if option_env!("VERGEN_GIT_DIRTY") == Some("true") {
+                        format!("{}-dirty", sha)
+                    } else {
+                        sha.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string()),
+        )
+        .architecture("gitlab-runner-rs")
+        .platform(env!("CARGO_BIN_NAME"))
+        .build()
+        .await;
 
     runner
         .run(new_job, 64)
