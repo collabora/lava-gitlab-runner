@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -10,8 +10,8 @@ use colored::{Color, Colorize};
 use futures::stream::{Stream, TryStreamExt};
 use futures::{AsyncRead, AsyncReadExt, FutureExt, StreamExt};
 use gitlab_runner::job::Job;
-use gitlab_runner::outputln;
-use gitlab_runner::{CancellableJobHandler, JobResult, Phase, Runner, UploadableFile};
+use gitlab_runner::{outputln, GitlabLayer, RunnerBuilder};
+use gitlab_runner::{CancellableJobHandler, JobResult, Phase, UploadableFile};
 use handlebars::Handlebars;
 use lava_api::job::Health;
 use lava_api::joblog::{JobLogError, JobLogLevel, JobLogMsg};
@@ -22,6 +22,7 @@ use masker::Masker;
 use rand::random;
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
+use strum::{Display, EnumString};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
@@ -82,6 +83,15 @@ fn monitor_timeout() {
     }
 }
 
+#[derive(Display, EnumString)]
+#[strum(serialize_all = "lowercase")]
+enum LogFormat {
+    Pretty,
+    Full,
+    Compact,
+    Json,
+}
+
 #[derive(StructOpt)]
 struct Opts {
     #[structopt(env = "GITLAB_URL")]
@@ -90,6 +100,8 @@ struct Opts {
     token: String,
     #[structopt(short, long, env = "RUNNER_LOG")]
     log: Option<String>,
+    #[structopt(long, env = "RUNNER_LOG_FORMAT")]
+    log_format: Option<LogFormat>,
     #[structopt(
         short,
         long,
@@ -926,18 +938,35 @@ async fn main() {
     let opts = Opts::from_args();
     let dir = tempfile::tempdir().unwrap();
 
-    let (mut runner, layer) =
-        Runner::new_with_layer(opts.server, opts.token, dir.path().to_path_buf());
+    let (layer, jobs) = GitlabLayer::new();
 
-    let log_targets: filter::Targets = if let Some(log) = opts.log {
-        log.parse().unwrap()
+    let log_targets = if let Some(log) = opts.log {
+        log.parse::<filter::Targets>()
+            .unwrap()
+            .with_target("gitlab_runner::gitlab::job", Level::ERROR)
     } else {
         filter::Targets::new().with_default(Level::INFO)
     };
 
+    let log_format = opts.log_format.unwrap_or_else(|| {
+        if std::io::stdout().is_terminal() {
+            LogFormat::Pretty
+        } else {
+            LogFormat::Json
+        }
+    });
+
+    let fmt = tracing_subscriber::fmt::Layer::new();
+    let fmt = match log_format {
+        LogFormat::Full => fmt.boxed(),
+        LogFormat::Pretty => fmt.pretty().boxed(),
+        LogFormat::Compact => fmt.compact().boxed(),
+        LogFormat::Json => fmt.json().boxed(),
+    };
+
     tracing_subscriber::Registry::default()
         .with(layer)
-        .with(tracing_subscriber::fmt::Layer::new().with_filter(log_targets))
+        .with(fmt.with_filter(log_targets))
         .init();
 
     {
@@ -948,6 +977,24 @@ async fn main() {
             opts.max_concurrent_requests
         );
     }
+
+    let mut runner = RunnerBuilder::new(opts.server, opts.token, dir.path(), jobs)
+        .version(env!("CARGO_PKG_VERSION"))
+        .revision(
+            option_env!("VERGEN_GIT_SHA")
+                .map(|sha| {
+                    if option_env!("VERGEN_GIT_DIRTY") == Some("true") {
+                        format!("{}-dirty", sha)
+                    } else {
+                        sha.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string()),
+        )
+        .architecture("gitlab-runner-rs")
+        .platform(env!("CARGO_BIN_NAME"))
+        .build()
+        .await;
 
     runner
         .run(new_job, 64)
