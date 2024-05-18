@@ -1,4 +1,4 @@
-FROM rust:1-slim-bullseye AS build
+FROM rust:1-slim-bookworm AS build
 ARG DEBIAN_FRONTEND=noninteractive
 
 ADD . /app
@@ -7,12 +7,12 @@ RUN apt-get update \
   && apt-get install -y pkg-config libssl-dev \
   && cargo build --release
 
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN adduser --uid 1001 --group --no-create-home --home /app lava-gitlab-runner
 
-RUN apt update && apt install -y libssl1.1 ca-certificates
+RUN apt update && apt install -y libssl3 ca-certificates
 COPY --from=build /app/target/release/lava-gitlab-runner /usr/local/bin
 
 USER lava-gitlab-runner
