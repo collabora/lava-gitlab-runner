@@ -4,7 +4,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ADD . /app
 WORKDIR /app
 RUN apt-get update \
-  && apt-get install -y pkg-config libssl-dev \
+  && apt-get install -y pkg-config libssl-dev cmake \
   && cargo build --release
 
 FROM debian:bookworm-slim
