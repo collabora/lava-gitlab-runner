@@ -34,4 +34,4 @@ tracing = "0.1.31"
 strum = { version = "0.26.2", features = ["derive"] }
 
 [build-dependencies]
-vergen = { version = "8.3.1", features = ["git", "gitcl"] }
+vergen = { version = "8.3.2", features = ["git", "gitcl"] }
