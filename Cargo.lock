@@ -1024,9 +1024,9 @@ dependencies = [
 
 [[package]]
 name = "junit-parser"
-version = "1.1.0"
+version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0991cf5114a920f0b3a1ab284a4ea6176555f3f7b07cb2d568d1bfab3454ddc"
+checksum = "0d6c34dc9172a57860c4a552d691bcf00a276d4b922758960a018eea34381390"
 dependencies = [
  "quick-xml",
  "thiserror",
@@ -1494,9 +1494,9 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.31.0"
+version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1004a344b30a54e2ee58d66a71b32d2db2feb0a31f9a2d302bf0536f15de2a33"
+checksum = "4091e032efecb09d7b1f711f487b85ab925632a842627e3200fb088382cde32c"
 dependencies = [
  "memchr",
 ]
