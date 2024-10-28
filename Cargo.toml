@@ -20,7 +20,7 @@ url = "2.2.2"
 tokio = "1.35"
 async-trait = "0.1.51"
 futures = "0.3.17"
-handlebars = "5"
+handlebars = "6"
 masker = { version="0.0.4", features=["streams"] }
 junit-parser = "1"
 serde = { version = "^1.0.194", features = ["derive"] }
