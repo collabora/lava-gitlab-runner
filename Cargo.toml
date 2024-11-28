@@ -9,7 +9,7 @@ homepage = "https://gitlab.collabora.com/lava/lava-gitlab-runner"
 repository = "https://gitlab.collabora.com/lava/lava-gitlab-runner.git"
 
 [dependencies]
-bytes = "1.2.1"
+bytes = "1.9.0"
 chrono = { version = "0.4.20", features = ["serde"] }
 colored = "2"
 gitlab-runner = "0.1.0"
