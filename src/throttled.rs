@@ -29,7 +29,7 @@ struct PermitDebug<'a> {
 }
 
 #[cfg(debug_assertions)]
-impl<'a> Drop for PermitDebug<'a> {
+impl Drop for PermitDebug<'_> {
     fn drop(&mut self) {
         match self.start {
             Some(start) => {
@@ -275,7 +275,7 @@ impl<'a, T> Throttled<'a, T> {
     }
 }
 
-impl<'a, T> core::ops::Deref for Throttled<'a, T> {
+impl<T> core::ops::Deref for Throttled<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -283,13 +283,13 @@ impl<'a, T> core::ops::Deref for Throttled<'a, T> {
     }
 }
 
-impl<'a, T> core::ops::DerefMut for Throttled<'a, T> {
+impl<T> core::ops::DerefMut for Throttled<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.inner
     }
 }
 
-impl<'a, T> futures::stream::Stream for Throttled<'a, T>
+impl<T> futures::stream::Stream for Throttled<'_, T>
 where
     T: futures::stream::Stream + Unpin,
 {
