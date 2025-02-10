@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{IsTerminal, Read};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -381,6 +382,7 @@ struct Run {
     masker: Arc<Masker>,
     ids: Vec<i64>,
     cancel_behaviour: Option<JobCancelBehaviour>,
+    repo_path: Option<PathBuf>,
 }
 
 impl Run {
@@ -397,6 +399,11 @@ impl Run {
             .collect::<Vec<_>>();
         let masker = Arc::new(Masker::new(&masked, MASK_PATTERN));
 
+        let repo_path = job
+            .clone_git_repository()
+            .map_err(|e| outputln!("Failed to checkout repo: {}", e.to_string()))
+            .ok();
+
         Self {
             lava: lava.clone(),
             store: Arc::new(AvailableArtifactStore::new(lava, masker.clone())),
@@ -405,10 +412,21 @@ impl Run {
             masker,
             ids: Vec::new(),
             cancel_behaviour,
+            repo_path,
         }
     }
 
     async fn find_file(&self, filename: &str) -> Result<Vec<u8>, ()> {
+        if let Some(repo_path) = &self.repo_path {
+            let path = repo_path.join(filename);
+            if path.exists() {
+                let data = tokio::fs::read(&path).await.map_err(|e| {
+                    outputln!("Failed to read repo file {:?}: {}", path, e.to_string())
+                })?;
+                return Ok(data);
+            }
+        }
+
         for d in self.job.dependencies() {
             let artifact = match d.download().await {
                 Ok(a) => a,
@@ -434,7 +452,7 @@ impl Run {
                 };
             }
         }
-        outputln!("{} not found in artifacts", filename);
+        outputln!("{} not found in repo or artifacts", filename);
         Err(())
     }
 
