@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::{Buf, Bytes};
+use clap::Parser;
 use colored::{Color, Colorize};
 use futures::stream::{Stream, TryStreamExt};
 use futures::{AsyncRead, AsyncReadExt, FutureExt, StreamExt};
@@ -21,7 +22,6 @@ use lazy_static::lazy_static;
 use masker::Masker;
 use rand::random;
 use serde::{Deserialize, Serialize};
-use structopt::StructOpt;
 use strum::{Display, EnumString};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
@@ -83,7 +83,7 @@ fn monitor_timeout() {
     }
 }
 
-#[derive(Display, EnumString)]
+#[derive(Copy, Clone, Display, EnumString)]
 #[strum(serialize_all = "lowercase")]
 enum LogFormat {
     Pretty,
@@ -92,17 +92,17 @@ enum LogFormat {
     Json,
 }
 
-#[derive(StructOpt)]
+#[derive(Parser)]
 struct Opts {
-    #[structopt(env = "GITLAB_URL")]
+    #[clap(env = "GITLAB_URL")]
     server: Url,
-    #[structopt(env = "GITLAB_TOKEN")]
+    #[clap(env = "GITLAB_TOKEN")]
     token: String,
-    #[structopt(short, long, env = "RUNNER_LOG")]
+    #[clap(short, long, env = "RUNNER_LOG")]
     log: Option<String>,
-    #[structopt(long, env = "RUNNER_LOG_FORMAT")]
+    #[clap(long, env = "RUNNER_LOG_FORMAT")]
     log_format: Option<LogFormat>,
-    #[structopt(
+    #[clap(
         short,
         long,
         default_value = "4",
@@ -936,7 +936,7 @@ async fn new_job(job: Job) -> Result<impl CancellableJobHandler<LavaUploadableFi
 
 #[tokio::main]
 async fn main() {
-    let opts = Opts::from_args();
+    let opts = Opts::parse();
     let dir = tempfile::tempdir().unwrap();
 
     let (layer, jobs) = GitlabLayer::new();
