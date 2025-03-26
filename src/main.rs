@@ -350,6 +350,7 @@ impl LavaUploadableFile {
     }
 }
 
+#[async_trait::async_trait]
 impl UploadableFile for LavaUploadableFile {
     type Data<'a> = Box<dyn AsyncRead + Send + Unpin + 'a>;
 
@@ -360,14 +361,14 @@ impl UploadableFile for LavaUploadableFile {
         }
     }
 
-    fn get_data(&self) -> Self::Data<'_> {
+    async fn get_data(&self) -> Result<Self::Data<'_>, ()> {
         outputln!("Uploading {}", self.get_path());
         match &self.which {
             LavaUploadableFileType::Log { id } => {
-                Box::new(self.store.get_log(*id).into_async_read())
+                Ok(Box::new(self.store.get_log(*id).into_async_read()))
             }
             LavaUploadableFileType::Junit { id } => {
-                Box::new(self.store.get_junit(*id).into_async_read())
+                Ok(Box::new(self.store.get_junit(*id).into_async_read()))
             }
         }
     }
