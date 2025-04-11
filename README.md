@@ -73,6 +73,15 @@ inside a shell they're directly executed by the runner itself.
 These variables will typically be set as (masked) CI variables, but they could
 also be provided directly in the job.
 
+## Accessing GitLab CI job variables inside LAVA job definition file
+
+GitLab CI job variables are exposed as fields of a ``job`` template variable
+inside the LAVA job definition file. Example:
+
+```
+job_name: Automated test submitted from GitLab CI Job {{ job.CI_JOB_ID }}
+```
+
 ## Runner supported commands
 
 The following commands are currently supported in the job scripts:
