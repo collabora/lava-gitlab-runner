@@ -141,11 +141,7 @@ impl DisplayBox {
         let kl = key.as_ref().len();
         let vl = value.as_ref().len();
         let total = kl + vl + 6; // two vertical bars, two edge spaces, colon space in centre
-        let spacing = if total < self.width {
-            self.width - total
-        } else {
-            0
-        };
+        let spacing = self.width.saturating_sub(total);
         let mut spacer = String::new();
         for _ in 0..spacing {
             spacer.push(' ');
@@ -160,7 +156,7 @@ impl DisplayBox {
 
     fn edge(width: usize, top: bool, fg: Color) {
         let mut line = String::new();
-        let hyphens = if width > 2 { width - 2 } else { 0 };
+        let hyphens = width.saturating_sub(2);
         if top {
             line.push('/');
         } else {
@@ -271,7 +267,7 @@ impl AvailableArtifactStore {
                 .log(id)
                 .map(|x| x.raw())
                 .flatten_stream()
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+                .map_err(std::io::Error::other),
         ))
     }
 
@@ -283,13 +279,10 @@ impl AvailableArtifactStore {
             self.lava
                 .job_results_as_junit(id)
                 .map(|res| match res {
-                    Ok(s) => s
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-                        .boxed(),
-                    Err(e) => futures::stream::once(async move {
-                        Err(std::io::Error::new(std::io::ErrorKind::Other, e))
-                    })
-                    .boxed(),
+                    Ok(s) => s.map_err(std::io::Error::other).boxed(),
+                    Err(e) => {
+                        futures::stream::once(async move { Err(std::io::Error::other(e)) }).boxed()
+                    }
                 })
                 .flatten_stream(),
         )
@@ -647,7 +640,7 @@ impl Run {
                 .job_results_as_junit(id)
                 .await
                 .map_err(|_| ())?
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+                .map_err(std::io::Error::other),
         )
         .into_async_read()
         .read_to_end(&mut bytes)
