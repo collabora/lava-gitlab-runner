@@ -8,11 +8,13 @@ RUN apt-get update \
 
 FROM debian:bookworm-slim
 
-RUN adduser --uid 1001 --group --no-create-home --home /app lava-gitlab-runner
-
 RUN apt-get update \
   && apt-get install -y --no-install-recommends libssl3 ca-certificates \
   && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -g 1001 lava-gitlab-runner \
+  && useradd -u 1001 -g lava-gitlab-runner -d /app -M lava-gitlab-runner
+
 COPY --from=build /app/target/release/lava-gitlab-runner /usr/local/bin
 
 USER lava-gitlab-runner
