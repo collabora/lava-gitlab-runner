@@ -16,8 +16,8 @@ RUN apt-get update \
 RUN groupadd -g 1001 lava-gitlab-runner \
   && useradd -u 1001 -g lava-gitlab-runner -d /app -M lava-gitlab-runner
 
-COPY --from=build /app/target/release/lava-gitlab-runner /usr/local/bin
+COPY --from=build /app/target/release/lava-gitlab-runner /usr/local/bin/
 
 USER lava-gitlab-runner
 
-ENTRYPOINT [ "/usr/local/bin/lava-gitlab-runner" ]
+ENTRYPOINT ["/usr/local/bin/lava-gitlab-runner"]
