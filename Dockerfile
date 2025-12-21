@@ -1,5 +1,4 @@
 FROM rust:1-slim-bookworm AS build
-ARG DEBIAN_FRONTEND=noninteractive
 
 ADD . /app
 WORKDIR /app
@@ -8,7 +7,6 @@ RUN apt-get update \
   && cargo build --release
 
 FROM debian:bookworm-slim
-ARG DEBIAN_FRONTEND=noninteractive
 
 RUN adduser --uid 1001 --group --no-create-home --home /app lava-gitlab-runner
 
