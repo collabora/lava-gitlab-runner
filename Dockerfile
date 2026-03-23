@@ -1,4 +1,4 @@
-FROM rust:1-slim-bookworm AS build
+FROM rust:slim-trixie AS build
 
 WORKDIR /app
 COPY . .
@@ -7,7 +7,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends pkg-config libssl-dev cmake \
   && cargo build --release
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends libssl3 ca-certificates \
