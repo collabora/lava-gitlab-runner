@@ -3,18 +3,18 @@ use futures::Stream;
 use tokio::sync::{Semaphore, SemaphorePermit, TryAcquireError};
 
 use bytes::Bytes;
+use lava_api::Lava;
 use lava_api::device::Devices;
 use lava_api::job::{self, Jobs, JobsBuilder};
 use lava_api::joblog::{JobLog, JobLogBuilder, JobLogRaw};
 use lava_api::paginator::{PaginationError, Paginator};
 use lava_api::tag::Tag;
 use lava_api::worker::Worker;
-use lava_api::Lava;
 
 #[cfg(debug_assertions)]
-use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(debug_assertions)]
 use std::sync::Mutex;
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(debug_assertions)]
 use std::time::Instant;
 #[cfg(debug_assertions)]
