@@ -222,17 +222,17 @@ impl ThrottledLava {
         self.inner.tags().await
     }
 
-    pub async fn devices(&self) -> Throttled<Devices> {
+    pub async fn devices(&self) -> Throttled<'_, Devices<'_>> {
         let permit = self.throttler.acquire("devices").await;
         Throttled::new(self.inner.devices(), permit)
     }
 
-    pub async fn log(&self, id: i64) -> ThrottledJobLogBuilder {
+    pub async fn log(&self, id: i64) -> ThrottledJobLogBuilder<'_> {
         let permit = self.throttler.acquire("log").await;
         ThrottledJobLogBuilder::new(self.inner.log(id), permit)
     }
 
-    pub async fn jobs(&self) -> ThrottledJobsBuilder {
+    pub async fn jobs(&self) -> ThrottledJobsBuilder<'_> {
         let permit = self.throttler.acquire("jobs").await;
         ThrottledJobsBuilder::new(self.inner.jobs(), permit)
     }
@@ -255,7 +255,7 @@ impl ThrottledLava {
         job::job_results_as_junit(&self.inner, id).await
     }
 
-    pub async fn workers(&self) -> Throttled<Paginator<Worker>> {
+    pub async fn workers(&self) -> Throttled<'_, Paginator<Worker>> {
         let permit = self.throttler.acquire("workers").await;
         Throttled::new(self.inner.workers(), permit)
     }
