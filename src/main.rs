@@ -7,7 +7,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::post;
 use bytes::{Buf, Bytes};
 use clap::Parser;
@@ -29,7 +31,7 @@ use strum::{Display, EnumString};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tracing_subscriber::filter;
 use tracing_subscriber::prelude::*;
 use url::Url;
@@ -38,7 +40,7 @@ mod throttled;
 use throttled::{ThrottledLava, Throttler};
 
 mod upload;
-use upload::{JobArtifacts, UploadServer, UploadStore};
+use upload::{ArtifactFile, JobArtifacts, UploadError, UploadServer, UploadStore};
 
 const MASK_PATTERN: &str = "[MASKED]";
 
@@ -296,12 +298,28 @@ impl AvailableArtifactStore {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 enum LavaUploadableFileType {
     Log { id: i64 },
     Junit { id: i64 },
-    Artifact { path: String, data: Bytes },
+    Artifact { path: String, file: ArtifactFile },
 }
+
+impl PartialEq for LavaUploadableFileType {
+    /// Equality is based on the identity key of each variant (job ID for `Log`/`Junit`,
+    /// artifact path for `Artifact`).  The file content is intentionally excluded from
+    /// the comparison because `ArtifactFile` may be backed by a temp file on disk.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Log { id: a }, Self::Log { id: b }) => a == b,
+            (Self::Junit { id: a }, Self::Junit { id: b }) => a == b,
+            (Self::Artifact { path: a, .. }, Self::Artifact { path: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for LavaUploadableFileType {}
 
 #[derive(Clone)]
 struct LavaUploadableFile {
@@ -338,9 +356,9 @@ impl LavaUploadableFile {
         }
     }
 
-    pub fn artifact(path: String, data: Bytes) -> Self {
+    pub fn artifact(path: String, file: ArtifactFile) -> Self {
         Self {
-            which: LavaUploadableFileType::Artifact { path, data },
+            which: LavaUploadableFileType::Artifact { path, file },
             store: None,
         }
     }
@@ -371,9 +389,12 @@ impl UploadableFile for LavaUploadableFile {
                     .get_junit(*id)
                     .into_async_read(),
             )),
-            LavaUploadableFileType::Artifact { data, .. } => Ok(Box::new(
-                futures::io::AllowStdIo::new(std::io::Cursor::new(data.to_vec())),
-            )),
+            LavaUploadableFileType::Artifact { file, .. } => {
+                let reader = file.open_std_reader().map_err(|e| {
+                    outputln!("Failed to open artifact for upload: {}", e);
+                })?;
+                Ok(Box::new(futures::io::AllowStdIo::new(reader)))
+            }
         }
     }
 }
@@ -865,10 +886,10 @@ impl CancellableJobHandler<LavaUploadableFile> for Run {
         }
         if let Some(artifacts) = &self.artifacts {
             for path in artifacts.artifact_paths() {
-                let data = artifacts
-                    .artifact_data(&path)
-                    .expect("Artifact data missing for path returned by artifact_paths");
-                available_files.push(LavaUploadableFile::artifact(path, data));
+                let file = artifacts
+                    .artifact_file(&path)
+                    .expect("Artifact file missing for path returned by artifact_paths");
+                available_files.push(LavaUploadableFile::artifact(path, file));
             }
         }
         Ok(Box::new(available_files.into_iter()))
@@ -963,8 +984,17 @@ async fn upload_artifact(
     State(store): State<Arc<Mutex<UploadStore>>>,
     Path((key, path)): Path<(String, String)>,
     body: Bytes,
-) {
-    store.lock().unwrap().upload_file(&key, &path, body);
+) -> impl IntoResponse {
+    match store.lock().unwrap().upload_file(&key, &path, body) {
+        Ok(()) => StatusCode::OK,
+        Err(UploadError::UnknownKey) => StatusCode::NOT_FOUND,
+        Err(UploadError::InvalidPath) => StatusCode::BAD_REQUEST,
+        Err(UploadError::LimitExceeded) => StatusCode::PAYLOAD_TOO_LARGE,
+        Err(UploadError::Io(e)) => {
+            warn!("IO error storing artifact for key {:?}: {}", key, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
 }
 
 #[tokio::main]
@@ -1045,6 +1075,7 @@ async fn main() {
 
             let app = Router::new()
                 .route("/artifacts/{key}/{*path}", post(upload_artifact))
+                .layer(DefaultBodyLimit::max(upload::ARTIFACT_JOB_LIMIT as usize))
                 .with_state(store);
 
             let listener = tokio::net::TcpListener::bind(&listen_addr)
