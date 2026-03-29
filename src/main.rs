@@ -7,7 +7,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::post;
 use bytes::{Buf, Bytes};
 use clap::Parser;
@@ -29,7 +31,7 @@ use strum::{Display, EnumString};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tracing_subscriber::filter;
 use tracing_subscriber::prelude::*;
 use url::Url;
@@ -38,7 +40,7 @@ mod throttled;
 use throttled::{ThrottledLava, Throttler};
 
 mod upload;
-use upload::{JobArtifacts, UploadServer, UploadStore};
+use upload::{ArtifactFile, JobArtifacts, UploadError, UploadServer, UploadStore};
 
 const MASK_PATTERN: &str = "[MASKED]";
 
@@ -296,53 +298,63 @@ impl AvailableArtifactStore {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum LavaUploadableFileType {
-    Log { id: i64 },
-    Junit { id: i64 },
-    Artifact { path: String, data: Bytes },
-}
-
 #[derive(Clone)]
-struct LavaUploadableFile {
-    store: Option<Arc<AvailableArtifactStore>>,
-    which: LavaUploadableFileType,
+enum LavaUploadableFile {
+    Log {
+        id: i64,
+        store: Arc<AvailableArtifactStore>,
+    },
+    Junit {
+        id: i64,
+        store: Arc<AvailableArtifactStore>,
+    },
+    Artifact {
+        path: String,
+        file: ArtifactFile,
+    },
 }
 
 impl core::fmt::Debug for LavaUploadableFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        self.which.fmt(f)
+        match self {
+            Self::Log { id, .. } => f.debug_struct("Log").field("id", id).finish(),
+            Self::Junit { id, .. } => f.debug_struct("Junit").field("id", id).finish(),
+            Self::Artifact { path, file } => f
+                .debug_struct("Artifact")
+                .field("path", path)
+                .field("file", file)
+                .finish(),
+        }
     }
 }
 
-impl core::cmp::PartialEq for LavaUploadableFile {
+impl PartialEq for LavaUploadableFile {
+    /// Equality is based on the identity key of each variant (job ID for `Log`/`Junit`,
+    /// artifact path for `Artifact`).  The store and file content are intentionally
+    /// excluded from the comparison.
     fn eq(&self, other: &Self) -> bool {
-        self.which.eq(&other.which)
+        match (self, other) {
+            (Self::Log { id: a, .. }, Self::Log { id: b, .. }) => a == b,
+            (Self::Junit { id: a, .. }, Self::Junit { id: b, .. }) => a == b,
+            (Self::Artifact { path: a, .. }, Self::Artifact { path: b, .. }) => a == b,
+            _ => false,
+        }
     }
 }
 
-impl core::cmp::Eq for LavaUploadableFile {}
+impl Eq for LavaUploadableFile {}
 
 impl LavaUploadableFile {
     pub fn log(id: i64, store: Arc<AvailableArtifactStore>) -> Self {
-        Self {
-            which: LavaUploadableFileType::Log { id },
-            store: Some(store),
-        }
+        LavaUploadableFile::Log { id, store }
     }
 
     pub fn junit(id: i64, store: Arc<AvailableArtifactStore>) -> Self {
-        Self {
-            which: LavaUploadableFileType::Junit { id },
-            store: Some(store),
-        }
+        LavaUploadableFile::Junit { id, store }
     }
 
-    pub fn artifact(path: String, data: Bytes) -> Self {
-        Self {
-            which: LavaUploadableFileType::Artifact { path, data },
-            store: None,
-        }
+    pub fn artifact(path: String, file: ArtifactFile) -> Self {
+        LavaUploadableFile::Artifact { path, file }
     }
 }
 
@@ -351,29 +363,28 @@ impl UploadableFile for LavaUploadableFile {
     type Data<'a> = Box<dyn AsyncRead + Send + Unpin + 'a>;
 
     fn get_path(&self) -> Cow<'_, str> {
-        match &self.which {
-            LavaUploadableFileType::Log { id } => format!("{}_log.yaml", id).into(),
-            LavaUploadableFileType::Junit { id } => format!("{}_junit.xml", id).into(),
-            LavaUploadableFileType::Artifact { path, .. } => path.as_str().into(),
+        match self {
+            LavaUploadableFile::Log { id, .. } => format!("{}_log.yaml", id).into(),
+            LavaUploadableFile::Junit { id, .. } => format!("{}_junit.xml", id).into(),
+            LavaUploadableFile::Artifact { path, .. } => path.as_str().into(),
         }
     }
 
     async fn get_data(&self) -> Result<Self::Data<'_>, ()> {
         outputln!("Uploading {}", self.get_path());
-        match &self.which {
-            LavaUploadableFileType::Log { id } => Ok(Box::new(
-                self.store.as_ref().unwrap().get_log(*id).into_async_read(),
-            )),
-            LavaUploadableFileType::Junit { id } => Ok(Box::new(
-                self.store
-                    .as_ref()
-                    .unwrap()
-                    .get_junit(*id)
-                    .into_async_read(),
-            )),
-            LavaUploadableFileType::Artifact { data, .. } => Ok(Box::new(
-                futures::io::AllowStdIo::new(std::io::Cursor::new(data.to_vec())),
-            )),
+        match self {
+            LavaUploadableFile::Log { id, store } => {
+                Ok(Box::new(store.get_log(*id).into_async_read()))
+            }
+            LavaUploadableFile::Junit { id, store } => {
+                Ok(Box::new(store.get_junit(*id).into_async_read()))
+            }
+            LavaUploadableFile::Artifact { file, .. } => {
+                let reader = file.open_std_reader().map_err(|e| {
+                    outputln!("Failed to open artifact for upload: {}", e);
+                })?;
+                Ok(Box::new(futures::io::AllowStdIo::new(reader)))
+            }
         }
     }
 }
@@ -864,11 +875,8 @@ impl CancellableJobHandler<LavaUploadableFile> for Run {
             available_files.push(LavaUploadableFile::junit(*id, self.store.clone()));
         }
         if let Some(artifacts) = &self.artifacts {
-            for path in artifacts.artifact_paths() {
-                let data = artifacts
-                    .artifact_data(&path)
-                    .expect("Artifact data missing for path returned by artifact_paths");
-                available_files.push(LavaUploadableFile::artifact(path, data));
+            for (path, file) in artifacts.artifacts() {
+                available_files.push(LavaUploadableFile::artifact(path, file));
             }
         }
         Ok(Box::new(available_files.into_iter()))
@@ -963,8 +971,17 @@ async fn upload_artifact(
     State(store): State<Arc<Mutex<UploadStore>>>,
     Path((key, path)): Path<(String, String)>,
     body: Bytes,
-) {
-    store.lock().unwrap().upload_file(&key, &path, body);
+) -> impl IntoResponse {
+    match store.lock().unwrap().upload_file(&key, &path, body) {
+        Ok(()) => StatusCode::OK,
+        Err(UploadError::UnknownKey) => StatusCode::NOT_FOUND,
+        Err(UploadError::InvalidPath) => StatusCode::BAD_REQUEST,
+        Err(UploadError::LimitExceeded) => StatusCode::PAYLOAD_TOO_LARGE,
+        Err(UploadError::Io(e)) => {
+            warn!("IO error storing artifact for key {:?}: {}", key, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
 }
 
 #[tokio::main]
@@ -1045,6 +1062,7 @@ async fn main() {
 
             let app = Router::new()
                 .route("/artifacts/{key}/{*path}", post(upload_artifact))
+                .layer(DefaultBodyLimit::max(upload::ARTIFACT_JOB_LIMIT as usize))
                 .with_state(store);
 
             let listener = tokio::net::TcpListener::bind(&listen_addr)
