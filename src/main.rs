@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{IsTerminal, Read};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use bytes::{Buf, Bytes};
@@ -11,14 +11,13 @@ use colored::{Color, Colorize};
 use futures::stream::{Stream, TryStreamExt};
 use futures::{AsyncRead, AsyncReadExt, FutureExt, StreamExt};
 use gitlab_runner::job::Job;
-use gitlab_runner::{outputln, GitlabLayer, RunnerBuilder};
 use gitlab_runner::{CancellableJobHandler, JobResult, Phase, UploadableFile};
+use gitlab_runner::{GitlabLayer, RunnerBuilder, outputln};
 use handlebars::Handlebars;
 use lava_api::job::Health;
 use lava_api::joblog::{JobLogError, JobLogLevel, JobLogMsg};
 use lava_api::paginator::PaginationError;
-use lava_api::{job, Lava};
-use lazy_static::lazy_static;
+use lava_api::{Lava, job};
 use masker::Masker;
 use rand::random;
 use serde::{Deserialize, Serialize};
@@ -176,13 +175,13 @@ impl DisplayBox {
     }
 }
 
-fn format_value(v: &serde_yaml::Value) -> String {
+fn format_value(v: &serde_norway::Value) -> String {
     match v {
-        serde_yaml::Value::Null => "null".to_string(),
-        serde_yaml::Value::Bool(b) => b.to_string(),
-        serde_yaml::Value::Number(n) => n.to_string(),
-        serde_yaml::Value::String(s) => format!("\"{}\"", s),
-        serde_yaml::Value::Sequence(seq) => {
+        serde_norway::Value::Null => "null".to_string(),
+        serde_norway::Value::Bool(b) => b.to_string(),
+        serde_norway::Value::Number(n) => n.to_string(),
+        serde_norway::Value::String(s) => format!("\"{}\"", s),
+        serde_norway::Value::Sequence(seq) => {
             let mut s = String::new();
             s.push_str("[ ");
             let mut first = true;
@@ -196,7 +195,7 @@ fn format_value(v: &serde_yaml::Value) -> String {
             s.push_str(" ]");
             s
         }
-        serde_yaml::Value::Mapping(map) => {
+        serde_norway::Value::Mapping(map) => {
             let mut s = String::new();
             s.push_str("{ ");
             let mut first = true;
@@ -210,7 +209,7 @@ fn format_value(v: &serde_yaml::Value) -> String {
             s.push_str(" }");
             s
         }
-        serde_yaml::Value::Tagged(t) => format!("{}: {}", t.tag, format_value(&t.value)),
+        serde_norway::Value::Tagged(t) => format!("{}: {}", t.tag, format_value(&t.value)),
     }
 }
 
@@ -626,11 +625,7 @@ impl Run {
             sleep(timeout.next_timeout()).await;
         }
 
-        if failures {
-            Err(())
-        } else {
-            Ok(())
-        }
+        if failures { Err(()) } else { Ok(()) }
     }
 
     async fn all_tests_passed(&self, id: i64) -> Result<bool, ()> {
@@ -847,10 +842,9 @@ impl CancellableJobHandler<LavaUploadableFile> for Run {
 
 type LavaMap = Arc<Mutex<BTreeMap<(String, String), Arc<ThrottledLava>>>>;
 
-lazy_static! {
-    static ref LAVA_MAP: LavaMap = Arc::new(Mutex::new(BTreeMap::new()));
-    static ref MAX_CONCURRENT_REQUESTS: Arc<Mutex<usize>> = Arc::new(Mutex::new(20));
-}
+static LAVA_MAP: LazyLock<LavaMap> = LazyLock::new(|| Arc::new(Mutex::new(BTreeMap::new())));
+static MAX_CONCURRENT_REQUESTS: LazyLock<Arc<Mutex<usize>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(20)));
 
 async fn new_job(job: Job) -> Result<impl CancellableJobHandler<LavaUploadableFile>, ()> {
     info!("Creating new run for job: {}", job.id());
