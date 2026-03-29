@@ -1,20 +1,23 @@
-FROM rust:1-slim-bookworm AS build
-ARG DEBIAN_FRONTEND=noninteractive
+FROM rust:slim-trixie AS build
 
-ADD . /app
 WORKDIR /app
+COPY . .
+
 RUN apt-get update \
-  && apt-get install -y pkg-config libssl-dev cmake \
+  && apt-get install -y --no-install-recommends pkg-config libssl-dev cmake \
   && cargo build --release
 
-FROM debian:bookworm-slim
-ARG DEBIAN_FRONTEND=noninteractive
+FROM debian:trixie-slim
 
-RUN adduser --uid 1001 --group --no-create-home --home /app lava-gitlab-runner
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends libssl3 ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
-RUN apt update && apt install -y libssl3 ca-certificates
-COPY --from=build /app/target/release/lava-gitlab-runner /usr/local/bin
+RUN groupadd -g 1001 lava-gitlab-runner \
+  && useradd -u 1001 -g lava-gitlab-runner -d /app -M lava-gitlab-runner
+
+COPY --from=build /app/target/release/lava-gitlab-runner /usr/local/bin/
 
 USER lava-gitlab-runner
 
-ENTRYPOINT [ "/usr/local/bin/lava-gitlab-runner" ]
+ENTRYPOINT ["/usr/local/bin/lava-gitlab-runner"]
