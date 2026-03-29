@@ -361,29 +361,19 @@ impl UploadableFile for LavaUploadableFile {
     async fn get_data(&self) -> Result<Self::Data<'_>, ()> {
         outputln!("Uploading {}", self.get_path());
         match &self.which {
-            LavaUploadableFileType::Log { id } => {
-                Ok(Box::new(
-                    self.store
-                        .as_ref()
-                        .unwrap()
-                        .get_log(*id)
-                        .into_async_read(),
-                ))
-            }
-            LavaUploadableFileType::Junit { id } => {
-                Ok(Box::new(
-                    self.store
-                        .as_ref()
-                        .unwrap()
-                        .get_junit(*id)
-                        .into_async_read(),
-                ))
-            }
-            LavaUploadableFileType::Artifact { data, .. } => {
-                Ok(Box::new(futures::io::AllowStdIo::new(
-                    std::io::Cursor::new(data.to_vec()),
-                )))
-            }
+            LavaUploadableFileType::Log { id } => Ok(Box::new(
+                self.store.as_ref().unwrap().get_log(*id).into_async_read(),
+            )),
+            LavaUploadableFileType::Junit { id } => Ok(Box::new(
+                self.store
+                    .as_ref()
+                    .unwrap()
+                    .get_junit(*id)
+                    .into_async_read(),
+            )),
+            LavaUploadableFileType::Artifact { data, .. } => Ok(Box::new(
+                futures::io::AllowStdIo::new(std::io::Cursor::new(data.to_vec())),
+            )),
         }
     }
 }
@@ -783,9 +773,10 @@ impl Run {
                 "submit" => {
                     if let Some(filename) = p.next() {
                         let data = self.find_file(filename).await?;
-                        let artifacts = self.upload_server.as_ref().and_then(|s| {
-                            s.lock().unwrap().add_new_job()
-                        });
+                        let artifacts = self
+                            .upload_server
+                            .as_ref()
+                            .and_then(|s| s.lock().unwrap().add_new_job());
                         let upload_url = artifacts
                             .as_ref()
                             .map(|a| a.upload_url().to_string())
@@ -1076,10 +1067,7 @@ async fn main() {
     };
 
     runner
-        .run(
-            move |job| new_job(job, upload_server.clone()),
-            64,
-        )
+        .run(move |job| new_job(job, upload_server.clone()), 64)
         .await
         .expect("Couldn't pick up jobs");
 }

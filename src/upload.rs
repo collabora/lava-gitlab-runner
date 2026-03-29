@@ -106,12 +106,7 @@ impl JobArtifacts {
     }
 
     pub fn artifact_data(&self, path: &str) -> Option<Bytes> {
-        self.inner
-            .lock()
-            .unwrap()
-            .artifacts
-            .get(path)
-            .cloned()
+        self.inner.lock().unwrap().artifacts.get(path).cloned()
     }
 }
 
