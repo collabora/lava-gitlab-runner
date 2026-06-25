@@ -1,6 +1,6 @@
 [package]
 name = "lava-gitlab-runner"
-version = "0.3.5"
+version = "0.3.6"
 authors = ["Sjoerd Simons <sjoerd@collabora.com>"]
 edition = "2024"
 rust-version = "1.90"
