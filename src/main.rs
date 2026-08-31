@@ -794,11 +794,18 @@ impl Run {
                 "submit" => {
                     if let Some(filename) = p.next() {
                         let data = self.find_file(filename).await?;
-                        let artifacts = self
-                            .upload_server
-                            .as_ref()
-                            .and_then(|s| s.lock().unwrap().add_new_job());
-                        let upload_url = artifacts
+                        // Reuse the JobArtifacts (and its upload key/URL) across
+                        // multiple "submit" commands in the same script, since it
+                        // already supports holding several artifacts. Overwriting
+                        // it per-submit would drop earlier submits' artifacts.
+                        if self.artifacts.is_none() {
+                            self.artifacts = self
+                                .upload_server
+                                .as_ref()
+                                .and_then(|s| s.lock().unwrap().add_new_job());
+                        }
+                        let upload_url = self
+                            .artifacts
                             .as_ref()
                             .map(|a| a.upload_url().to_string())
                             .unwrap_or_default();
@@ -811,7 +818,6 @@ impl Run {
                         };
                         let ids = self.submit_definition(&definition).await?;
                         self.ids.extend(&ids);
-                        self.artifacts = artifacts;
                         self.follow_job(ids[0], cancel_token, JobCancelBehaviour::CancelLava)
                             .await
                     } else {
