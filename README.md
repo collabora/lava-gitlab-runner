@@ -73,6 +73,17 @@ inside a shell they're directly executed by the runner itself.
 These variables will typically be set as (masked) CI variables, but they could
 also be provided directly in the job.
 
+The runner also supports the following environment variables, set on the
+runner itself, to enable LAVA jobs to upload artifact files back to it (see
+[Runner artifacts](#runner-artifacts)):
+
+* `LAVA_ARTIFACT_UPLOAD_BASE_URL`: The externally reachable base URL of the
+  runner's upload endpoint (e.g. `https://my-runner-host:8443/artifacts`).
+  Uploads are disabled unless this is set.
+* `LAVA_ARTIFACT_UPLOAD_LISTEN_ADDR` (optional): The local address the
+  upload server binds to, e.g. `0.0.0.0:8443`. Defaults to `0.0.0.0:0` (a
+  random port).
+
 ## Accessing GitLab CI job variables inside LAVA job definition file
 
 GitLab CI job variables are exposed as fields of a ``job`` template variable
@@ -106,6 +117,28 @@ incomplete state.
 
 When the gitlab job definition defines artifacts, the log file(s) of the
 submitted or monitor jobs will be uploaded as an artifact by the runner.
+
+When `LAVA_ARTIFACT_UPLOAD_BASE_URL` is set (see
+[Runner variables usage](#runner-variables-usage)), each submitted LAVA job
+also gets its own job-scoped upload URL, exposed as
+`{{ runner.ARTIFACT_UPLOAD_URL }}` inside the LAVA job definition file. A test
+running on the DUT (or dispatcher) can `POST` (or `curl -T`) files to this URL
+followed by the relative path/filename under which the artifact should be
+stored (uploads are capped at 1 GB per job), e.g.:
+
+```
+- test:
+    definition:
+      - repository:
+          metadata:
+            ...
+          run:
+            steps:
+              - curl -T my-large-log.txt "{{ runner.ARTIFACT_UPLOAD_URL }}my-large-log.txt"
+```
+
+These uploaded files are included alongside the log/JUnit output in the
+GitLab job's artifact archive once the LAVA job finishes.
 
 ## Example jobs
 

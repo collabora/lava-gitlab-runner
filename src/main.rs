@@ -1,10 +1,16 @@
 use std::borrow::Cow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
+use std::env;
 use std::io::{IsTerminal, Read};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
+use axum::Router;
+use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::routing::post;
 use bytes::{Buf, Bytes};
 use clap::Parser;
 use colored::{Color, Colorize};
@@ -25,13 +31,18 @@ use strum::{Display, EnumString};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tracing_subscriber::filter;
 use tracing_subscriber::prelude::*;
 use url::Url;
 
 mod throttled;
 use throttled::{ThrottledLava, Throttler};
+
+mod upload;
+use upload::{
+    ArtifactFile, JobArtifacts, UploadError, UploadServer, UploadStore, sanitize_artifact_path,
+};
 
 const MASK_PATTERN: &str = "[MASKED]";
 
@@ -118,6 +129,7 @@ struct MonitorJobs {
 #[derive(Clone, Debug, Serialize)]
 struct TransformVariables<'a> {
     pub job: BTreeMap<&'a str, &'a str>,
+    pub runner: BTreeMap<&'a str, &'a str>,
 }
 
 #[derive(Debug)]
@@ -288,15 +300,32 @@ impl AvailableArtifactStore {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(Clone, Debug)]
 enum LavaUploadableFileType {
     Log { id: i64 },
     Junit { id: i64 },
+    Artifact { path: String, file: ArtifactFile },
 }
+
+impl PartialEq for LavaUploadableFileType {
+    /// Equality is based on the identity key of each variant (job ID for `Log`/`Junit`,
+    /// artifact path for `Artifact`).  The file content is intentionally excluded from
+    /// the comparison because `ArtifactFile` may be backed by a temp file on disk.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Log { id: a }, Self::Log { id: b }) => a == b,
+            (Self::Junit { id: a }, Self::Junit { id: b }) => a == b,
+            (Self::Artifact { path: a, .. }, Self::Artifact { path: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for LavaUploadableFileType {}
 
 #[derive(Clone)]
 struct LavaUploadableFile {
-    store: Arc<AvailableArtifactStore>,
+    store: Option<Arc<AvailableArtifactStore>>,
     which: LavaUploadableFileType,
 }
 
@@ -314,30 +343,25 @@ impl core::cmp::PartialEq for LavaUploadableFile {
 
 impl core::cmp::Eq for LavaUploadableFile {}
 
-impl core::cmp::PartialOrd for LavaUploadableFile {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl core::cmp::Ord for LavaUploadableFile {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.which.cmp(&other.which)
-    }
-}
-
 impl LavaUploadableFile {
     pub fn log(id: i64, store: Arc<AvailableArtifactStore>) -> Self {
         Self {
             which: LavaUploadableFileType::Log { id },
-            store,
+            store: Some(store),
         }
     }
 
     pub fn junit(id: i64, store: Arc<AvailableArtifactStore>) -> Self {
         Self {
             which: LavaUploadableFileType::Junit { id },
-            store,
+            store: Some(store),
+        }
+    }
+
+    pub fn artifact(path: String, file: ArtifactFile) -> Self {
+        Self {
+            which: LavaUploadableFileType::Artifact { path, file },
+            store: None,
         }
     }
 }
@@ -347,20 +371,31 @@ impl UploadableFile for LavaUploadableFile {
     type Data<'a> = Box<dyn AsyncRead + Send + Unpin + 'a>;
 
     fn get_path(&self) -> Cow<'_, str> {
-        match self.which {
+        match &self.which {
             LavaUploadableFileType::Log { id } => format!("{}_log.yaml", id).into(),
             LavaUploadableFileType::Junit { id } => format!("{}_junit.xml", id).into(),
+            LavaUploadableFileType::Artifact { path, .. } => path.as_str().into(),
         }
     }
 
     async fn get_data(&self) -> Result<Self::Data<'_>, ()> {
         outputln!("Uploading {}", self.get_path());
         match &self.which {
-            LavaUploadableFileType::Log { id } => {
-                Ok(Box::new(self.store.get_log(*id).into_async_read()))
-            }
-            LavaUploadableFileType::Junit { id } => {
-                Ok(Box::new(self.store.get_junit(*id).into_async_read()))
+            LavaUploadableFileType::Log { id } => Ok(Box::new(
+                self.store.as_ref().unwrap().get_log(*id).into_async_read(),
+            )),
+            LavaUploadableFileType::Junit { id } => Ok(Box::new(
+                self.store
+                    .as_ref()
+                    .unwrap()
+                    .get_junit(*id)
+                    .into_async_read(),
+            )),
+            LavaUploadableFileType::Artifact { file, .. } => {
+                let reader = file.open_std_reader().map_err(|e| {
+                    outputln!("Failed to open artifact for upload: {}", e);
+                })?;
+                Ok(Box::new(futures::io::AllowStdIo::new(reader)))
             }
         }
     }
@@ -374,6 +409,8 @@ struct Run {
     masker: Arc<Masker>,
     ids: Vec<i64>,
     cancel_behaviour: Option<JobCancelBehaviour>,
+    upload_server: Option<Arc<Mutex<UploadServer>>>,
+    artifacts: Option<JobArtifacts>,
 }
 
 impl Run {
@@ -382,6 +419,7 @@ impl Run {
         url: Url,
         job: Job,
         cancel_behaviour: Option<JobCancelBehaviour>,
+        upload_server: Option<Arc<Mutex<UploadServer>>>,
     ) -> Self {
         let masked = job
             .variables()
@@ -398,6 +436,8 @@ impl Run {
             masker,
             ids: Vec::new(),
             cancel_behaviour,
+            upload_server,
+            artifacts: None,
         }
     }
 
@@ -725,7 +765,7 @@ impl Run {
         }
     }
 
-    fn transform(&self, definition: String) -> Result<String, ()> {
+    fn transform(&self, definition: String, upload_url: &str) -> Result<String, ()> {
         let mut handlebars = Handlebars::new();
         handlebars.set_strict_mode(true);
         handlebars
@@ -740,6 +780,7 @@ impl Run {
                 .variables()
                 .map(|var| (var.key(), var.value()))
                 .collect(),
+            runner: BTreeMap::from([("ARTIFACT_UPLOAD_URL", upload_url)]),
         };
         handlebars.render("definition", &mappings).map_err(|e| {
             outputln!("Failed to substitute in template: {}", e);
@@ -755,8 +796,23 @@ impl Run {
                 "submit" => {
                     if let Some(filename) = p.next() {
                         let data = self.find_file(filename).await?;
+                        // Reuse the JobArtifacts (and its upload key/URL) across
+                        // multiple "submit" commands in the same script, since it
+                        // already supports holding several artifacts. Overwriting
+                        // it per-submit would drop earlier submits' artifacts.
+                        if self.artifacts.is_none() {
+                            self.artifacts = self
+                                .upload_server
+                                .as_ref()
+                                .and_then(|s| s.lock().unwrap().add_new_job());
+                        }
+                        let upload_url = self
+                            .artifacts
+                            .as_ref()
+                            .map(|a| a.upload_url().to_string())
+                            .unwrap_or_default();
                         let definition = match String::from_utf8(data) {
-                            Ok(data) => self.transform(data)?,
+                            Ok(data) => self.transform(data, &upload_url)?,
                             Err(_) => {
                                 outputln!("Job definition is not utf-8");
                                 return Err(());
@@ -836,6 +892,14 @@ impl CancellableJobHandler<LavaUploadableFile> for Run {
             available_files.push(LavaUploadableFile::log(*id, self.store.clone()));
             available_files.push(LavaUploadableFile::junit(*id, self.store.clone()));
         }
+        if let Some(artifacts) = &self.artifacts {
+            for path in artifacts.artifact_paths() {
+                let file = artifacts
+                    .artifact_file(&path)
+                    .expect("Artifact file missing for path returned by artifact_paths");
+                available_files.push(LavaUploadableFile::artifact(path, file));
+            }
+        }
         Ok(Box::new(available_files.into_iter()))
     }
 }
@@ -846,7 +910,10 @@ static LAVA_MAP: LazyLock<LavaMap> = LazyLock::new(|| Arc::new(Mutex::new(BTreeM
 static MAX_CONCURRENT_REQUESTS: LazyLock<Arc<Mutex<usize>>> =
     LazyLock::new(|| Arc::new(Mutex::new(20)));
 
-async fn new_job(job: Job) -> Result<impl CancellableJobHandler<LavaUploadableFile>, ()> {
+async fn new_job(
+    job: Job,
+    upload_server: Option<Arc<Mutex<UploadServer>>>,
+) -> Result<impl CancellableJobHandler<LavaUploadableFile>, ()> {
     info!("Creating new run for job: {}", job.id());
     let lava_url = match job.variable("LAVA_URL") {
         Some(u) => u,
@@ -918,7 +985,49 @@ async fn new_job(job: Job) -> Result<impl CancellableJobHandler<LavaUploadableFi
         }
     };
 
-    Ok(Run::new(lava, url, job, cancel_behaviour))
+    Ok(Run::new(lava, url, job, cancel_behaviour, upload_server))
+}
+
+async fn upload_artifact(
+    State(store): State<Arc<Mutex<UploadStore>>>,
+    Path((key, path)): Path<(String, String)>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let sanitized = match sanitize_artifact_path(&path) {
+        Some(s) => s,
+        None => return StatusCode::BAD_REQUEST,
+    };
+
+    // Only hold the global store lock long enough to clone the per-job
+    // handle; the (possibly slow) write below must not block it, since
+    // that would also stall job registration/removal for unrelated jobs.
+    let job = { store.lock().unwrap().get_job(&key) };
+    let job = match job {
+        Some(job) => job,
+        None => {
+            warn!("Attempt to upload {:?} for non-existent job key", path);
+            return StatusCode::NOT_FOUND;
+        }
+    };
+
+    // Writing large artifacts to disk is blocking I/O; run it on a blocking
+    // thread so it doesn't stall the async runtime or other uploads.
+    let result =
+        tokio::task::spawn_blocking(move || job.lock().unwrap().upload_artifact(&sanitized, body))
+            .await;
+
+    match result {
+        Ok(Ok(())) => StatusCode::OK,
+        Ok(Err(UploadError::LimitExceeded)) => StatusCode::PAYLOAD_TOO_LARGE,
+        Ok(Err(UploadError::Io(e))) => {
+            warn!("IO error storing artifact for key {:?}: {}", key, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+        Err(e) => {
+            warn!("Upload task for key {:?} panicked: {}", key, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
 }
 
 #[tokio::main]
@@ -984,8 +1093,45 @@ async fn main() {
         .build()
         .await;
 
+    let upload_server = match env::var("LAVA_ARTIFACT_UPLOAD_BASE_URL") {
+        Ok(base_url_str) => {
+            let base_url: url::Url = base_url_str
+                .parse()
+                .expect("LAVA_ARTIFACT_UPLOAD_BASE_URL is not a valid URL");
+            let listen_addr = env::var("LAVA_ARTIFACT_UPLOAD_LISTEN_ADDR")
+                .unwrap_or_else(|_| "0.0.0.0:0".to_string());
+
+            let mut server = UploadServer::new();
+            server.set_base_url(base_url);
+            let server = Arc::new(Mutex::new(server));
+            let store = server.lock().unwrap().store();
+
+            let app = Router::new()
+                .route("/artifacts/{key}/{*path}", post(upload_artifact))
+                .layer(DefaultBodyLimit::max(upload::ARTIFACT_JOB_LIMIT as usize))
+                .with_state(store);
+
+            let listener = tokio::net::TcpListener::bind(&listen_addr)
+                .await
+                .expect("Failed to bind upload listener");
+            info!(
+                "Artifact upload server listening on {}",
+                listener.local_addr().unwrap()
+            );
+
+            tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .await
+                    .expect("Artifact upload server failed");
+            });
+
+            Some(server)
+        }
+        Err(_) => None,
+    };
+
     runner
-        .run(new_job, 64)
+        .run(move |job| new_job(job, upload_server.clone()), 64)
         .await
         .expect("Couldn't pick up jobs");
 }
