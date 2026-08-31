@@ -81,8 +81,7 @@ runner itself, to enable LAVA jobs to upload artifact files back to it (see
   runner's upload endpoint (e.g. `https://my-runner-host:8443/artifacts`).
   Uploads are disabled unless this is set.
 * `LAVA_ARTIFACT_UPLOAD_LISTEN_ADDR` (optional): The local address the
-  upload server binds to, e.g. `0.0.0.0:8443`. Defaults to `0.0.0.0:0` (a
-  random port).
+  upload server binds to. Defaults to `0.0.0.0:8443`.
 
 ## Accessing GitLab CI job variables inside LAVA job definition file
 

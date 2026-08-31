@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use tempfile::NamedTempFile;
-use tracing::warn;
+use tokio_util::compat::TokioAsyncReadCompatExt;
 
 /// Files smaller than this are kept in memory; larger files are spilled to disk.
 const ARTIFACT_MEMORY_THRESHOLD: u64 = 1024 * 1024; // 1 MB
@@ -34,12 +34,8 @@ pub fn sanitize_artifact_path(path: &str) -> Option<String> {
     Some(components.join("/"))
 }
 
-/// Errors returned by [`UploadStore::upload_file`].
+/// Errors returned by [`JobArtifactsInner::upload_artifact`].
 pub enum UploadError {
-    /// No job is registered under the given key.
-    UnknownKey,
-    /// The supplied path failed sanitization.
-    InvalidPath,
     /// Accepting this upload would exceed the per-job byte limit.
     LimitExceeded,
     /// An I/O error occurred while spilling the artifact to disk.
@@ -70,11 +66,18 @@ impl ArtifactFile {
         Self(Arc::new(ArtifactFileInner::Disk(f)))
     }
 
-    /// Open a synchronous reader for the artifact data.
-    pub fn open_std_reader(&self) -> std::io::Result<Box<dyn std::io::Read + Send>> {
+    /// Open an asynchronous reader for the artifact data.
+    pub async fn open_async_reader(
+        &self,
+    ) -> std::io::Result<Box<dyn futures::io::AsyncRead + Send + Unpin>> {
         match &*self.0 {
-            ArtifactFileInner::Memory(bytes) => Ok(Box::new(std::io::Cursor::new(bytes.clone()))),
-            ArtifactFileInner::Disk(f) => Ok(Box::new(std::fs::File::open(f.path())?)),
+            ArtifactFileInner::Memory(bytes) => {
+                Ok(Box::new(futures::io::Cursor::new(bytes.clone())))
+            }
+            ArtifactFileInner::Disk(file) => {
+                let reader = tokio::fs::File::open(file.path()).await?;
+                Ok(Box::new(reader.compat()))
+            }
         }
     }
 }
@@ -104,19 +107,13 @@ impl UploadStore {
         }
     }
 
-    /// Called by the axum handler to store an uploaded file.
-    ///
-    /// Returns [`UploadError::InvalidPath`] if `path` fails sanitization,
-    /// [`UploadError::UnknownKey`] if no job is registered under `key`, or
-    /// [`UploadError::LimitExceeded`] if the per-job quota would be exceeded.
-    pub fn upload_file(&mut self, key: &str, path: &str, data: Bytes) -> Result<(), UploadError> {
-        let sanitized = sanitize_artifact_path(path).ok_or(UploadError::InvalidPath)?;
-        if let Some(ja) = self.jobs.get(key) {
-            ja.lock().unwrap().upload_artifact(&sanitized, data)
-        } else {
-            warn!("Attempt to upload {:?} for non-existent job key", path);
-            Err(UploadError::UnknownKey)
-        }
+    /// Look up the per-job artifacts handle for `key`, cloning the `Arc` and
+    /// releasing the store lock immediately. The caller can then lock the
+    /// returned handle directly to perform (potentially blocking) file I/O,
+    /// without holding the global store lock — so a slow upload can't block
+    /// other uploads or job registration/removal.
+    pub fn get_job(&self, key: &str) -> Option<Arc<Mutex<JobArtifactsInner>>> {
+        self.jobs.get(key).cloned()
     }
 }
 
@@ -220,7 +217,7 @@ impl Drop for JobArtifacts {
 // JobArtifactsInner
 // ---------------------------------------------------------------------------
 
-struct JobArtifactsInner {
+pub struct JobArtifactsInner {
     /// Maps sanitized path → (byte size, stored file).
     artifacts: BTreeMap<String, (u64, ArtifactFile)>,
     /// Running total of bytes currently stored (decreases on overwrite).
@@ -235,7 +232,10 @@ impl JobArtifactsInner {
         }
     }
 
-    fn upload_artifact(&mut self, path: &str, data: Bytes) -> Result<(), UploadError> {
+    /// Store an uploaded artifact. This performs blocking file I/O for large
+    /// artifacts (see below), so callers running on an async runtime should
+    /// invoke it via `spawn_blocking` rather than calling it directly.
+    pub fn upload_artifact(&mut self, path: &str, data: Bytes) -> Result<(), UploadError> {
         let data_len = data.len() as u64;
         // Subtract any existing file at this path from the running total so that
         // overwrites don't permanently consume quota for the old content.
@@ -263,5 +263,31 @@ impl JobArtifactsInner {
         self.artifacts
             .insert(path.to_string(), (data_len, artifact_file));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ArtifactFile;
+    use bytes::Bytes;
+    use futures::io::AsyncReadExt;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[tokio::test]
+    async fn artifact_async_reader_reads_memory_and_disk_files() {
+        let memory_file = ArtifactFile::new_memory(Bytes::from_static(b"memory"));
+        let mut reader = memory_file.open_async_reader().await.unwrap();
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data).await.unwrap();
+        assert_eq!(data, b"memory");
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(b"disk").unwrap();
+        let disk_file = ArtifactFile::new_disk(temp_file);
+        let mut reader = disk_file.open_async_reader().await.unwrap();
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data).await.unwrap();
+        assert_eq!(data, b"disk");
     }
 }

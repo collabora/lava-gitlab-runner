@@ -40,7 +40,9 @@ mod throttled;
 use throttled::{ThrottledLava, Throttler};
 
 mod upload;
-use upload::{ArtifactFile, JobArtifacts, UploadError, UploadServer, UploadStore};
+use upload::{
+    ArtifactFile, JobArtifacts, UploadError, UploadServer, UploadStore, sanitize_artifact_path,
+};
 
 const MASK_PATTERN: &str = "[MASKED]";
 
@@ -380,10 +382,10 @@ impl UploadableFile for LavaUploadableFile {
                 Ok(Box::new(store.get_junit(*id).into_async_read()))
             }
             LavaUploadableFile::Artifact { file, .. } => {
-                let reader = file.open_std_reader().map_err(|e| {
+                let reader = file.open_async_reader().await.map_err(|e| {
                     outputln!("Failed to open artifact for upload: {}", e);
                 })?;
-                Ok(Box::new(futures::io::AllowStdIo::new(reader)))
+                Ok(reader)
             }
         }
     }
@@ -978,13 +980,38 @@ async fn upload_artifact(
     Path((key, path)): Path<(String, String)>,
     body: Bytes,
 ) -> impl IntoResponse {
-    match store.lock().unwrap().upload_file(&key, &path, body) {
-        Ok(()) => StatusCode::OK,
-        Err(UploadError::UnknownKey) => StatusCode::NOT_FOUND,
-        Err(UploadError::InvalidPath) => StatusCode::BAD_REQUEST,
-        Err(UploadError::LimitExceeded) => StatusCode::PAYLOAD_TOO_LARGE,
-        Err(UploadError::Io(e)) => {
+    let sanitized = match sanitize_artifact_path(&path) {
+        Some(s) => s,
+        None => return StatusCode::BAD_REQUEST,
+    };
+
+    // Only hold the global store lock long enough to clone the per-job
+    // handle; the (possibly slow) write below must not block it, since
+    // that would also stall job registration/removal for unrelated jobs.
+    let job = { store.lock().unwrap().get_job(&key) };
+    let job = match job {
+        Some(job) => job,
+        None => {
+            warn!("Attempt to upload {:?} for non-existent job key", path);
+            return StatusCode::NOT_FOUND;
+        }
+    };
+
+    // Writing large artifacts to disk is blocking I/O; run it on a blocking
+    // thread so it doesn't stall the async runtime or other uploads.
+    let result =
+        tokio::task::spawn_blocking(move || job.lock().unwrap().upload_artifact(&sanitized, body))
+            .await;
+
+    match result {
+        Ok(Ok(())) => StatusCode::OK,
+        Ok(Err(UploadError::LimitExceeded)) => StatusCode::PAYLOAD_TOO_LARGE,
+        Ok(Err(UploadError::Io(e))) => {
             warn!("IO error storing artifact for key {:?}: {}", key, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+        Err(e) => {
+            warn!("Upload task for key {:?} panicked: {}", key, e);
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
@@ -1059,7 +1086,7 @@ async fn main() {
                 .parse()
                 .expect("LAVA_ARTIFACT_UPLOAD_BASE_URL is not a valid URL");
             let listen_addr = env::var("LAVA_ARTIFACT_UPLOAD_LISTEN_ADDR")
-                .unwrap_or_else(|_| "0.0.0.0:0".to_string());
+                .unwrap_or_else(|_| "0.0.0.0:8443".to_string());
 
             let mut server = UploadServer::new();
             server.set_base_url(base_url);
