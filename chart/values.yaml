@@ -29,6 +29,8 @@ podAnnotations: {}
 
 podSecurityContext:
   fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
 
 securityContext:
   capabilities:
