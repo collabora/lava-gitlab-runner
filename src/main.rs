@@ -25,7 +25,7 @@ use strum::{Display, EnumString};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tracing_subscriber::filter;
 use tracing_subscriber::prelude::*;
 use url::Url;
@@ -984,8 +984,41 @@ async fn main() {
         .build()
         .await;
 
-    runner
-        .run(new_job, 64)
-        .await
-        .expect("Couldn't pick up jobs");
+    let mut shutdown = Box::pin(shutdown_signal());
+
+    // request_job is not cancel safe, so only wait on the shutdown signal
+    // between job requests.
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            _ = runner.wait_for_space(MAX_JOBS) => (),
+        }
+        match runner.request_job(new_job).await {
+            Ok(true) => continue,
+            Ok(false) => (),
+            Err(e) => warn!("Couldn't get a job from gitlab: {:?}", e),
+        }
+        tokio::select! {
+            _ = &mut shutdown => break,
+            _ = sleep(Duration::from_secs(5)) => (),
+        }
+    }
+
+    info!(
+        "Shutting down, waiting for {} running job(s) to finish",
+        runner.running()
+    );
+    runner.drain().await;
+}
+
+const MAX_JOBS: usize = 64;
+
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut term = signal(SignalKind::terminate()).expect("Couldn't install SIGTERM handler");
+    tokio::select! {
+        _ = term.recv() => (),
+        _ = tokio::signal::ctrl_c() => (),
+    }
 }

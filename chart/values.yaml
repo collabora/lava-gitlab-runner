@@ -27,6 +27,11 @@ fullnameOverride: ""
 
 podAnnotations: {}
 
+# On SIGTERM the runner stops taking new jobs and waits for the running ones
+# to finish. Set this to at least the longest expected job duration so that
+# scale-downs and rollouts don't kill jobs.
+terminationGracePeriodSeconds: 3600
+
 podSecurityContext:
   fsGroup: 1001
   seccompProfile:
