@@ -51,6 +51,8 @@ spec:
               value: {{ .Values.loglevel }}
             - name: RUNNER_MAX_CONCURRENT_REQUESTS
               value: "{{ .Values.max_concurrent_requests }}"
+            - name: RUNNER_MAX_JOBS
+              value: "{{ .Values.max_jobs }}"
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
