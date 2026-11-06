@@ -65,6 +65,15 @@ autoscaling:
   maxReplicas: 100
   targetCPUUtilizationPercentage: 80
   # targetMemoryUtilizationPercentage: 80
+  # Scale down slowly: each removed pod drains its running jobs on SIGTERM
+  # (up to terminationGracePeriodSeconds), so avoid removing many at once.
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 900
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 600
 
 nodeSelector: {}
 
