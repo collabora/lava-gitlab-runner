@@ -8,6 +8,8 @@ loglevel: "info"
 # Lava can struggle with a lot of parallel request so minimize these to
 # something reasonably low
 max_concurrent_requests: 4
+# Maximum number of jobs a single replica handles at once
+max_jobs: 64
 
 gitlab:
   url: https://your.gitlab.server.org
@@ -27,8 +29,15 @@ fullnameOverride: ""
 
 podAnnotations: {}
 
+# On SIGTERM the runner stops taking new jobs and waits for the running ones
+# to finish. Set this to at least the longest expected job duration so that
+# scale-downs and rollouts don't kill jobs.
+terminationGracePeriodSeconds: 3600
+
 podSecurityContext:
   fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
 
 securityContext:
   capabilities:
@@ -58,6 +67,15 @@ autoscaling:
   maxReplicas: 100
   targetCPUUtilizationPercentage: 80
   # targetMemoryUtilizationPercentage: 80
+  # Scale down slowly: each removed pod drains its running jobs on SIGTERM
+  # (up to terminationGracePeriodSeconds), so avoid removing many at once.
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 900
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 600
 
 nodeSelector: {}
 

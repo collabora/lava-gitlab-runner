@@ -25,7 +25,7 @@ use strum::{Display, EnumString};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tracing_subscriber::filter;
 use tracing_subscriber::prelude::*;
 use url::Url;
@@ -108,6 +108,24 @@ struct Opts {
         env = "RUNNER_MAX_CONCURRENT_REQUESTS"
     )]
     max_concurrent_requests: usize,
+    /// Maximum number of jobs handled concurrently
+    #[clap(
+        long,
+        default_value = "64",
+        env = "RUNNER_MAX_JOBS",
+        value_parser = positive_usize
+    )]
+    max_jobs: usize,
+}
+
+fn positive_usize(value: &str) -> Result<usize, String> {
+    let value = value
+        .parse::<usize>()
+        .map_err(|error| format!("invalid job limit: {error}"))?;
+    if value == 0 {
+        return Err("job limit must be greater than zero".to_string());
+    }
+    Ok(value)
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -984,8 +1002,40 @@ async fn main() {
         .build()
         .await;
 
-    runner
-        .run(new_job, 64)
-        .await
-        .expect("Couldn't pick up jobs");
+    let max_jobs = opts.max_jobs;
+    let mut shutdown = Box::pin(shutdown_signal());
+
+    // request_job is not cancel safe, so only wait on the shutdown signal
+    // between job requests.
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            _ = runner.wait_for_space(max_jobs) => (),
+        }
+        match runner.request_job(new_job).await {
+            Ok(true) => continue,
+            Ok(false) => (),
+            Err(e) => warn!("Couldn't get a job from gitlab: {:?}", e),
+        }
+        tokio::select! {
+            _ = &mut shutdown => break,
+            _ = sleep(Duration::from_secs(5)) => (),
+        }
+    }
+
+    info!(
+        "Shutting down, waiting for {} running job(s) to finish",
+        runner.running()
+    );
+    runner.drain().await;
+}
+
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut term = signal(SignalKind::terminate()).expect("Couldn't install SIGTERM handler");
+    tokio::select! {
+        _ = term.recv() => (),
+        _ = tokio::signal::ctrl_c() => (),
+    }
 }
