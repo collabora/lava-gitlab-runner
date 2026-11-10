@@ -34,4 +34,4 @@ strum = { version = "0.28", features = ["derive"] }
 clap = { version = "4", features = ["derive", "env"] }
 
 [build-dependencies]
-vergen-gix = "9"
+vergen-gix = "10"
