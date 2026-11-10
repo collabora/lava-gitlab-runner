@@ -2474,9 +2474,9 @@ dependencies = [
 
 [[package]]
 name = "lava-api"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c77c8086f3504cc3597598e069f1670e1f9ca165f4b4c5a24b40fd3307a96f6"
+checksum = "a3b5a3c80bf65943ba260f32ad6b65a239471ffe5f5fe7ce3193d79006cf0bb6"
 dependencies = [
  "bytes",
  "chrono",
