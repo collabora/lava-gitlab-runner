@@ -2463,16 +2463,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "junit-parser"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5598182555aa4ede4e5a03b9a43789960d5199ff0027b100112eb7436e71f45"
-dependencies = [
- "quick-xml",
- "thiserror",
-]
-
-[[package]]
 name = "lava-api"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2505,7 +2495,6 @@ dependencies = [
  "futures",
  "gitlab-runner",
  "handlebars",
- "junit-parser",
  "lava-api",
  "masker",
  "rand 0.10.1",
@@ -2981,15 +2970,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf52d87428247c5aa3760ac8e7d8b13ec7b3579b955a8c3f311668b6860acba5"
 dependencies = [
  "parking_lot 0.12.5",
-]
-
-[[package]]
-name = "quick-xml"
-version = "0.38.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
-dependencies = [
- "memchr",
 ]
 
 [[package]]
