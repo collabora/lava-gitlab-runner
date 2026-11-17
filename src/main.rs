@@ -5,17 +5,17 @@ use std::io::{IsTerminal, Read};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use clap::Parser;
 use colored::{Color, Colorize};
 use futures::stream::{Stream, TryStreamExt};
-use futures::{AsyncRead, AsyncReadExt, FutureExt, StreamExt};
+use futures::{AsyncRead, FutureExt, StreamExt};
 use gitlab_runner::job::Job;
 use gitlab_runner::{CancellableJobHandler, JobResult, Phase, UploadableFile};
 use gitlab_runner::{GitlabLayer, RunnerBuilder, outputln};
 use handlebars::Handlebars;
 use lava_api::job::Health;
-use lava_api::joblog::{JobLogError, JobLogLevel, JobLogMsg};
+use lava_api::joblog::{JobLogError, JobLogLevel, JobLogMsg, JobResult as JobLogResult};
 use lava_api::paginator::PaginationError;
 use lava_api::{Lava, job};
 use masker::Masker;
@@ -80,6 +80,78 @@ fn monitor_timeout() {
             current
         );
     }
+}
+
+/// Whether all LAVA result events passed. Failed dispatcher actions are
+/// tolerated only when a later result for the same action level passed.
+fn log_results_passed(results: &[JobLogResult], parse_error: bool) -> bool {
+    if parse_error {
+        return false;
+    }
+
+    let Some(last_lava_result) = results.iter().rev().find(|r| r.definition == "lava") else {
+        return false;
+    };
+    if last_lava_result.case != "job" || last_lava_result.result != "pass" {
+        return false;
+    }
+
+    results.iter().enumerate().all(|(index, result)| {
+        if result.result != "fail" && result.result != "error" {
+            return true;
+        }
+        if result.definition != "lava" || result.level.is_none() {
+            return false;
+        }
+
+        results.iter().skip(index + 1).any(|later| {
+            later.definition == result.definition
+                && later.namespace == result.namespace
+                && later.case == result.case
+                && later.level == result.level
+                && later.result == "pass"
+        })
+    })
+}
+
+#[test]
+fn retried_action_results() {
+    let log_result = |definition: &str, case: &str, level: &str, result: &str| JobLogResult {
+        case: case.into(),
+        definition: definition.into(),
+        namespace: Some("common".into()),
+        level: Some(level.into()),
+        result: result.into(),
+        duration: None,
+        extra: std::collections::HashMap::new(),
+    };
+    let retry_results = [
+        log_result("lava", "http-download", "1.2.1", "fail"),
+        log_result("lava", "http-download", "1.2.1", "pass"),
+        log_result("0_smoke", "uname", "1.2.2", "pass"),
+        log_result("lava", "job", "1.3", "pass"),
+    ];
+    let different_action = [
+        log_result("lava", "http-download", "1.2.1", "fail"),
+        log_result("lava", "http-download", "1.3.1", "pass"),
+        log_result("lava", "job", "1.4", "pass"),
+    ];
+    let failed_attempt = [
+        log_result("lava", "http-download", "1.2.1", "fail"),
+        log_result("lava", "job", "1.3", "pass"),
+    ];
+    let test_failure = [
+        log_result("0_smoke", "uname", "1.2.2", "fail"),
+        log_result("0_smoke", "uname", "1.2.2", "pass"),
+        log_result("lava", "job", "1.3", "pass"),
+    ];
+
+    assert!(log_results_passed(&retry_results, false));
+    assert!(!log_results_passed(&retry_results, true));
+    assert!(!log_results_passed(&failed_attempt, false));
+    assert!(!log_results_passed(&different_action, false));
+    assert!(!log_results_passed(&test_failure, false));
+    assert!(!log_results_passed(&[], false));
 }
 
 #[derive(Copy, Clone, Display, EnumString)]
@@ -460,7 +532,13 @@ impl Run {
         self.masker.mask_str(msg)
     }
 
-    async fn update_log(&self, id: i64, offset: &mut u64) {
+    async fn update_log(
+        &self,
+        id: i64,
+        offset: &mut u64,
+        results: &mut Vec<JobLogResult>,
+        parse_error: &mut bool,
+    ) {
         let mut log = self.lava.log(id).await.start(*offset).log();
         while let Some(entry) = log.next().await {
             match entry {
@@ -495,6 +573,7 @@ impl Run {
                             }
                         }
                         JobLogMsg::Result(res) => {
+                            results.push(res.clone());
                             let fg = match res.result.as_str() {
                                 "pass" => color_for_level(&JobLogLevel::Results),
                                 "fail" => color_for_level(&JobLogLevel::Error),
@@ -534,6 +613,7 @@ impl Run {
                 }
                 Err(JobLogError::NoData) => (),
                 Err(JobLogError::ParseError(s, e)) => {
+                    *parse_error = true;
                     outputln!(
                         "{}",
                         format!(
@@ -628,29 +708,6 @@ impl Run {
         if failures { Err(()) } else { Ok(()) }
     }
 
-    async fn all_tests_passed(&self, id: i64) -> Result<bool, ()> {
-        let mut bytes = Vec::new();
-        Box::pin(
-            self.lava
-                .job_results_as_junit(id)
-                .await
-                .map_err(|_| ())?
-                .map_err(std::io::Error::other),
-        )
-        .into_async_read()
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|e| {
-            outputln!("Failed to get job results: {}", e);
-        })?;
-
-        let ts = junit_parser::from_reader(bytes.reader()).map_err(|e| {
-            outputln!("Failed to parse job results: {}", e);
-        })?;
-
-        Ok(ts.errors == 0 && ts.failures == 0)
-    }
-
     async fn get_job(&self, id: i64) -> Result<Option<job::Job>, PaginationError> {
         let mut jobs = self.lava.jobs().await.id(id).query();
         jobs.try_next().await
@@ -663,6 +720,8 @@ impl Run {
         cancel_behaviour: JobCancelBehaviour,
     ) -> JobResult {
         let mut offset = 0u64;
+        let mut log_results: Vec<JobLogResult> = Vec::new();
+        let mut log_parse_error = false;
         loop {
             // `get_job` is a separate function in order to limit the
             // scope of the permit it obtains via the throttled Lava
@@ -673,22 +732,29 @@ impl Run {
             match self.get_job(id).await {
                 Ok(Some(job)) => {
                     match job.state {
-                        job::State::Running => self.update_log(id, &mut offset).await,
+                        job::State::Running => {
+                            self.update_log(id, &mut offset, &mut log_results, &mut log_parse_error)
+                                .await
+                        }
                         job::State::Finished => {
                             /* Get the final part of the log if any */
-                            self.update_log(id, &mut offset).await;
+                            self.update_log(
+                                id,
+                                &mut offset,
+                                &mut log_results,
+                                &mut log_parse_error,
+                            )
+                            .await;
 
                             if job.health == Health::Complete {
-                                match self.all_tests_passed(id).await {
-                                    Ok(true) => {
-                                        return Ok(());
-                                    }
-                                    Ok(false) => {
-                                        outputln!("Job completed with errors");
-                                        return Err(());
-                                    }
-                                    Err(_) => return Err(()),
-                                };
+                                if log_parse_error {
+                                    outputln!("Failed to parse LAVA job log");
+                                }
+                                if log_results_passed(&log_results, log_parse_error) {
+                                    return Ok(());
+                                }
+                                outputln!("Job completed with errors");
+                                return Err(());
                             } else {
                                 outputln!("Job didn't complete correctly");
                                 return Err(());
@@ -696,7 +762,8 @@ impl Run {
                         }
                         _ => (),
                     }
-                    self.update_log(id, &mut offset).await;
+                    self.update_log(id, &mut offset, &mut log_results, &mut log_parse_error)
+                        .await;
                     if cancel_token.is_cancelled() {
                         match job.state {
                             job::State::Finished | job::State::Canceling => {}
