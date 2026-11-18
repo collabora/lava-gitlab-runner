@@ -48,8 +48,10 @@ run directly from source `cargo run https://gitlab.myserver.org RUNNER_TOKEN`.
 
 ## Running from a docker image
 
-A pre-built docker image can be found at
-registry.gitlab.collabora.com/lava/lava-gitlab-runner/main. To connect to the
+Pre-built docker images are published at
+`ghcr.io/collabora/lava-gitlab-runner`. Release tags are published as
+`vX.Y.Z`, `vX.Y` and `latest`; builds of the `main` branch are tagged `main`
+and every build is also tagged with its commit (`sha-<short sha>`). To connect to the
 gitlab server, `GITLAB_URL` and `GITLAB_TOKEN` should be set in the docker
 environment when running the container.
 

@@ -3,8 +3,15 @@ on:
   push:
     branches-ignore:
       - "gh-readonly-queue/**"
+    # Defining only branch filters would skip tag pushes entirely, so release
+    # tags must be listed explicitly to get versioned container images.
+    tags:
+      - "v*"
   pull_request:
   merge_group:
+  # Allows (re)building the image for an existing release tag by selecting the
+  # tag as the workflow ref.
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
@@ -96,10 +103,18 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Release tags keep the "v" prefix to match the chart appVersion.
+          tags: |
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha
+          flavor: |
+            latest=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         with:
           context: .
           push: true
