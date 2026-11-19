@@ -247,6 +247,54 @@ enum JobCancelBehaviour {
     LeaveRunning,
 }
 
+#[derive(Debug)]
+enum FindFileError {
+    NotFound {
+        filename: String,
+    },
+    ArtifactDownload {
+        dependency: String,
+        message: String,
+    },
+    ArtifactRead {
+        dependency: String,
+        filename: String,
+        source: std::io::Error,
+    },
+}
+
+impl std::fmt::Display for FindFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound { filename } => write!(f, "{filename} not found in artifacts"),
+            Self::ArtifactDownload {
+                dependency,
+                message,
+            } => write!(
+                f,
+                "failed to download dependency artifact from {dependency}: {message}"
+            ),
+            Self::ArtifactRead {
+                dependency,
+                filename,
+                source,
+            } => write!(
+                f,
+                "failed to read {filename} from dependency artifact {dependency}: {source}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FindFileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ArtifactRead { source, .. } => Some(source),
+            Self::NotFound { .. } | Self::ArtifactDownload { .. } => None,
+        }
+    }
+}
+
 struct AvailableArtifactStore {
     lava: Arc<ThrottledLava>,
     masker: Arc<Masker>,
@@ -401,12 +449,18 @@ impl Run {
         }
     }
 
-    async fn find_file(&self, filename: &str) -> Result<Vec<u8>, ()> {
+    async fn find_file(&self, filename: &str) -> Result<Vec<u8>, FindFileError> {
+        let mut artifact_error = None;
         for d in self.job.dependencies() {
             let artifact = match d.download().await {
                 Ok(a) => a,
-                Err(_) => {
-                    outputln!("Failed to get artifact from {}", d.name());
+                Err(e) => {
+                    if artifact_error.is_none() {
+                        artifact_error = Some(FindFileError::ArtifactDownload {
+                            dependency: d.name().to_owned(),
+                            message: e.to_string(),
+                        });
+                    }
                     continue;
                 }
             };
@@ -420,15 +474,20 @@ impl Run {
 
                 return match data {
                     Ok(data) => Ok(data),
-                    Err(e) => {
-                        outputln!("Failed to read file from artifact: {}", e);
-                        Err(())
-                    }
+                    Err(e) => Err(FindFileError::ArtifactRead {
+                        dependency: d.name().to_owned(),
+                        filename: filename.to_owned(),
+                        source: e,
+                    }),
                 };
             }
         }
-        outputln!("{} not found in artifacts", filename);
-        Err(())
+        match artifact_error {
+            Some(e) => Err(e),
+            None => Err(FindFileError::NotFound {
+                filename: filename.to_owned(),
+            }),
+        }
     }
 
     fn url_for_id(&self, id: i64) -> Url {
@@ -754,7 +813,13 @@ impl Run {
             match cmd {
                 "submit" => {
                     if let Some(filename) = p.next() {
-                        let data = self.find_file(filename).await?;
+                        let data = match self.find_file(filename).await {
+                            Ok(data) => data,
+                            Err(e) => {
+                                outputln!("{e}");
+                                return Err(());
+                            }
+                        };
                         let definition = match String::from_utf8(data) {
                             Ok(data) => self.transform(data)?,
                             Err(_) => {
@@ -773,7 +838,13 @@ impl Run {
                 }
                 "monitor-file" => {
                     if let Some(filename) = p.next() {
-                        let data = self.find_file(filename).await?;
+                        let data = match self.find_file(filename).await {
+                            Ok(data) => data,
+                            Err(e) => {
+                                outputln!("{e}");
+                                return Err(());
+                            }
+                        };
                         let jobs = match serde_json::from_slice::<MonitorJobs>(&data) {
                             Ok(jobs) if jobs.jobids.is_empty() => {
                                 outputln!("No job ids in json file!");
