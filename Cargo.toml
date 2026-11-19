@@ -13,7 +13,8 @@ repository = "https://gitlab.collabora.com/lava/lava-gitlab-runner.git"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 colored = "3"
-gitlab-runner = "0.4.0"
+# Use the repository_file API from gitlab-runner-rs until it is released.
+gitlab-runner = { version = "0.3.2", git = "https://github.com/collabora/gitlab-runner-rs", rev = "24a96a7dd6689f219fefd0ee7ddd3e30f6c7b2d8" }
 lava-api = "0.2.2"
 url = "2"
 tokio = "1"

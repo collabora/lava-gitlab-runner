@@ -86,11 +86,12 @@ job_name: Automated test submitted from GitLab CI Job {{ job.CI_JOB_ID }}
 
 The following commands are currently supported in the job scripts:
 
-`submit <filename>` - This submits the given filename from the dependencies to
-the lava server and will follow the lava job's log output. The gitlab job will
-fail if the lava job ends in an incomplete state or any other issue occurs
-(e.g. submission failure)
-
+`submit <filename>` - This first looks for the given filename in dependency
+artifacts. If it is not found, it fetches the file from the GitLab repository
+at the current job's commit using the GitLab job token. The file is then
+submitted to LAVA and its log output is followed. The GitLab job fails if the
+LAVA job ends in an incomplete state or another error occurs (for example,
+submission failure).
 
 
 
